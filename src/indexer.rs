@@ -1,28 +1,42 @@
 use anyhow::{anyhow, Result};
-use std::time::Duration;
+use ethers::types::H256;
+use std::time::{Duration, Instant};
 use tokio::time::{interval, sleep};
 use tracing::{error, info, warn};
+use futures::future::join_all;
+use std::sync::Arc;
+use chrono::Utc;
 
 use crate::db::operations::BlockRepository;
+use crate::db::address_analytics::AddressAnalyticsRepository;
 use crate::rpc::client::TaikoRpcClient;
-use crate::rpc::types::block_to_new_block;
+use crate::rpc::types::{block_to_new_block, transaction_to_new_transaction};
+use crate::bridge::BridgeDetector;
+use crate::analytics::analytics::process_block_analytics;
 
 pub struct BlockIndexer {
-    rpc_client: TaikoRpcClient,
-    block_repo: BlockRepository,
+    rpc_client: Arc<TaikoRpcClient>,
+    block_repo: Arc<BlockRepository>,
+    analytics_repo: Arc<AddressAnalyticsRepository>,
+    bridge_detector: Arc<BridgeDetector>,
     batch_size: u64,
+    concurrent_requests: usize,
 }
 
 impl BlockIndexer {
     pub fn new(
         rpc_client: TaikoRpcClient,
         block_repo: BlockRepository,
+        analytics_repo: AddressAnalyticsRepository,
         batch_size: u64,
     ) -> Self {
         Self {
-            rpc_client,
-            block_repo,
+            rpc_client: Arc::new(rpc_client),
+            block_repo: Arc::new(block_repo),
+            analytics_repo: Arc::new(analytics_repo),
+            bridge_detector: Arc::new(BridgeDetector::new()),
             batch_size,
+            concurrent_requests: 5, // Very conservative start
         }
     }
 
@@ -36,6 +50,23 @@ impl BlockIndexer {
     }
 
     async fn catch_up_historical_blocks(&self) -> Result<()> {
+        // Start with a single request to test RPC health
+        info!("🔍 Testing RPC connection...");
+        match self.rpc_client.get_latest_block_number().await {
+            Ok(latest_rpc_block) => {
+                info!("✅ RPC connection successful. Latest block: {}", latest_rpc_block);
+            },
+            Err(e) => {
+                error!("❌ Initial RPC test failed: {}", e);
+                if e.to_string().contains("429") || e.to_string().contains("Too Many Requests") {
+                    info!("⏳ Rate limited on first request. Waiting 10 seconds...");
+                    sleep(Duration::from_secs(10)).await;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+        
         let latest_rpc_block = self.rpc_client.get_latest_block_number().await?;
         let latest_db_block = self.block_repo.get_latest_block_number()?;
         
@@ -49,26 +80,207 @@ impl BlockIndexer {
             return Ok(());
         }
 
+        let total_blocks = latest_rpc_block - start_block + 1;
         info!(
-            "Syncing blocks from {} to {}",
-            start_block, latest_rpc_block
+            "🚀 Fast syncing {} blocks from {} to {} with {} concurrent requests",
+            total_blocks, start_block, latest_rpc_block, self.concurrent_requests
         );
 
+        let start_time = Instant::now();
+        let mut processed = 0u64;
+
+        info!("🐌 Processing {} blocks sequentially (one by one) to avoid rate limits", total_blocks);
+        
+        // Process blocks one by one - slow but reliable
         for block_num in start_block..=latest_rpc_block {
-            match self.index_single_block(block_num).await {
+            let block_start_time = Instant::now();
+            
+            match Self::fetch_and_store_block(
+                Arc::clone(&self.rpc_client), 
+                Arc::clone(&self.block_repo),
+                Arc::clone(&self.analytics_repo),
+                Arc::clone(&self.bridge_detector),
+                block_num
+            ).await {
                 Ok(_) => {
-                    if block_num % 100 == 0 {
-                        info!("Synced block #{}", block_num);
+                    processed += 1;
+                    
+                    // Progress report every 10 blocks
+                    if processed % 10 == 0 {
+                        let overall_blocks_per_sec = processed as f64 / start_time.elapsed().as_secs_f64();
+                        let db_latest = self.block_repo.get_latest_block_number().unwrap_or(Some(-1)).unwrap_or(-1);
+                        
+                        info!(
+                            "📊 Block #{} stored | Speed: {:.1} blocks/sec | DB Latest: {} | Progress: {:.2}%",
+                            block_num,
+                            overall_blocks_per_sec,
+                            db_latest,
+                            (processed as f64 / total_blocks as f64) * 100.0
+                        );
+                    }
+                },
+                Err(e) => {
+                    error!("❌ Failed to process block {}: {}", block_num, e);
+                    
+                    // Wait longer on errors to avoid getting banned
+                    sleep(Duration::from_secs(10)).await;
+                }
+            }
+            
+            // Small delay between requests to be respectful to RPC
+            sleep(Duration::from_millis(100)).await; // ~10 blocks/sec max
+        }
+
+        let total_duration = start_time.elapsed();
+        let avg_blocks_per_sec = processed as f64 / total_duration.as_secs_f64();
+        
+        info!(
+            "✅ Sync complete! Processed {} blocks in {:.2}s ({:.0} blocks/sec average)",
+            processed,
+            total_duration.as_secs_f64(),
+            avg_blocks_per_sec
+        );
+
+        Ok(())
+    }
+
+    async fn fetch_and_store_block(
+        rpc_client: Arc<TaikoRpcClient>,
+        block_repo: Arc<BlockRepository>,
+        analytics_repo: Arc<AddressAnalyticsRepository>,
+        bridge_detector: Arc<BridgeDetector>,
+        block_number: u64,
+    ) -> Result<()> {
+        // Check if block already exists
+        if block_repo.block_exists(block_number as i64)? {
+            return Ok(());
+        }
+
+        // Retry logic for rate limiting
+        let mut retries = 0;
+        const MAX_RETRIES: u32 = 3;
+        
+        loop {
+            match rpc_client.get_block_by_number(block_number).await {
+                Ok(Some(block)) => {
+                    // Convert and store block
+                    let new_block = block_to_new_block(&block);
+                    let block_hash = format!("0x{:x}", block.hash.unwrap());
+                    
+                    match block_repo.insert_block(new_block) {
+                        Ok(_) => {
+                            let mut receipts_for_analytics = Vec::new();
+                            
+                            // Block stored successfully, now fetch receipts and store transactions
+                            if !block.transactions.is_empty() {
+                                info!("📄 Fetching {} transaction receipts for block {}", block.transactions.len(), block_number);
+                                
+                                let tx_hashes: Vec<H256> = block.transactions.iter().map(|tx| tx.hash).collect();
+                                
+                                match rpc_client.get_transaction_receipts_batch(tx_hashes).await {
+                                    Ok(receipts) => {
+                                        let mut new_transactions = Vec::new();
+                                        
+                                        for (index, tx) in block.transactions.iter().enumerate() {
+                                            let receipt = receipts.get(index).and_then(|r| r.as_ref());
+                                            let new_tx = transaction_to_new_transaction(
+                                                tx, 
+                                                block_number as i64, 
+                                                &block_hash, 
+                                                index as i32,
+                                                receipt
+                                            );
+                                            new_transactions.push(new_tx);
+                                        }
+                                        
+                                        // Store receipts for analytics
+                                        receipts_for_analytics = receipts;
+                                        
+                                        match block_repo.insert_transactions_batch(new_transactions) {
+                                            Ok(inserted_count) => {
+                                                info!("✅ Block {} with {} transactions (with receipts) processed", block_number, inserted_count);
+                                            },
+                                            Err(e) => {
+                                                warn!("⚠️ Block {} stored but transaction insertion failed: {}", block_number, e);
+                                            }
+                                        }
+                                    },
+                                    Err(e) => {
+                                        warn!("🔄 Failed to fetch receipts for block {}, storing transactions without receipt data: {}", block_number, e);
+                                        
+                                        // Fallback: store transactions without receipt data
+                                        let mut new_transactions = Vec::new();
+                                        for (index, tx) in block.transactions.iter().enumerate() {
+                                            let new_tx = transaction_to_new_transaction(
+                                                tx, 
+                                                block_number as i64, 
+                                                &block_hash, 
+                                                index as i32,
+                                                None
+                                            );
+                                            new_transactions.push(new_tx);
+                                        }
+                                        
+                                        // Use empty receipts for analytics
+                                        receipts_for_analytics = vec![None; block.transactions.len()];
+                                        
+                                        let _ = block_repo.insert_transactions_batch(new_transactions);
+                                    }
+                                }
+                                
+                                // Process analytics after storing transactions
+                                let block_timestamp = block.timestamp.as_u64() as i64;
+                                if let Err(e) = process_block_analytics(
+                                    &analytics_repo,
+                                    &bridge_detector,
+                                    block_number as i64,
+                                    block_timestamp,
+                                    &block.transactions,
+                                    &receipts_for_analytics,
+                                ).await {
+                                    warn!("Failed to process analytics for block {}: {}", block_number, e);
+                                }
+                            }
+                            
+                            return Ok(());
+                        },
+                        Err(e) => {
+                            let error_msg = e.to_string();
+                            if error_msg.contains("duplicate key") {
+                                return Ok(()); // Block already exists, that's fine
+                            } else if error_msg.contains("connection") || error_msg.contains("timeout") {
+                                error!("Database connection error for block {}: {}", block_number, e);
+                                sleep(Duration::from_secs(1)).await;
+                                // Don't retry here, let it fail and be retried at chunk level
+                                return Err(e);
+                            } else {
+                                error!("Database insertion error for block {}: {}", block_number, e);
+                                return Err(e);
+                            }
+                        }
                     }
                 }
+                Ok(None) => {
+                    return Err(anyhow!("Block {} not found", block_number));
+                }
                 Err(e) => {
-                    error!("Failed to index block #{}: {}", block_num, e);
-                    sleep(Duration::from_secs(1)).await;
+                    let error_msg = e.to_string();
+                    if error_msg.contains("429") || error_msg.contains("Too Many Requests") {
+                        retries += 1;
+                        if retries > MAX_RETRIES {
+                            return Err(anyhow!("Max retries exceeded for block {}: {}", block_number, e));
+                        }
+                        
+                        // Exponential backoff: 1s, 2s, 4s
+                        let delay = Duration::from_secs(2_u64.pow(retries - 1));
+                        sleep(delay).await;
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
                 }
             }
         }
-
-        Ok(())
     }
 
     async fn start_real_time_indexing(&self) -> Result<()> {
@@ -114,9 +326,79 @@ impl BlockIndexer {
             .ok_or_else(|| anyhow!("Block {} not found", block_number))?;
 
         let new_block = block_to_new_block(&block);
+        let block_hash = format!("0x{:x}", block.hash.unwrap());
         
         match self.block_repo.insert_block(new_block) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                // Store transactions with receipts
+                if !block.transactions.is_empty() {
+                    let tx_hashes: Vec<H256> = block.transactions.iter().map(|tx| tx.hash).collect();
+                    
+                    match self.rpc_client.get_transaction_receipts_batch(tx_hashes).await {
+                        Ok(receipts) => {
+                            let mut new_transactions = Vec::new();
+                            
+                            for (index, tx) in block.transactions.iter().enumerate() {
+                                let receipt = receipts.get(index).and_then(|r| r.as_ref());
+                                let new_tx = transaction_to_new_transaction(
+                                    tx, 
+                                    block_number as i64, 
+                                    &block_hash, 
+                                    index as i32,
+                                    receipt
+                                );
+                                new_transactions.push(new_tx);
+                            }
+                            
+                            let _ = self.block_repo.insert_transactions_batch(new_transactions);
+                            
+                            // Process analytics after storing transactions  
+                            let block_timestamp = block.timestamp.as_u64() as i64;
+                            if let Err(e) = process_block_analytics(
+                                &self.analytics_repo,
+                                &self.bridge_detector,
+                                block_number as i64,
+                                block_timestamp,
+                                &block.transactions,
+                                &receipts,
+                            ).await {
+                                warn!("Failed to process analytics for block {}: {}", block_number, e);
+                            }
+                        },
+                        Err(_) => {
+                            // Fallback without receipts
+                            let mut new_transactions = Vec::new();
+                            for (index, tx) in block.transactions.iter().enumerate() {
+                                let new_tx = transaction_to_new_transaction(
+                                    tx, 
+                                    block_number as i64, 
+                                    &block_hash, 
+                                    index as i32,
+                                    None
+                                );
+                                new_transactions.push(new_tx);
+                            }
+                            let _ = self.block_repo.insert_transactions_batch(new_transactions);
+                            
+                            // Process analytics even without receipts
+                            let block_timestamp = block.timestamp.as_u64() as i64;
+                            let empty_receipts: Vec<Option<ethers::types::TransactionReceipt>> = vec![None; block.transactions.len()];
+                            if let Err(e) = process_block_analytics(
+                                &self.analytics_repo,
+                                &self.bridge_detector,
+                                block_number as i64,
+                                block_timestamp,
+                                &block.transactions,
+                                &empty_receipts,
+                            ).await {
+                                warn!("Failed to process analytics for block {}: {}", block_number, e);
+                            }
+                        }
+                    }
+                }
+                
+                Ok(())
+            },
             Err(e) => {
                 if e.to_string().contains("duplicate key") {
                     warn!("Block #{} already exists, skipping", block_number);
