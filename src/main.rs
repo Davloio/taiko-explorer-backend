@@ -1,18 +1,27 @@
+mod api;
+mod bridge;
 mod config;
 mod db;
+mod graphql;
 mod indexer;
 mod models;
 mod rpc;
 mod schema;
+
+mod analytics {
+    pub mod analytics;
+}
 
 use anyhow::Result;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
+use crate::api::server::create_router;
 use crate::config::Config;
 use crate::db::connection::establish_connection;
 use crate::db::operations::BlockRepository;
+use crate::db::address_analytics::AddressAnalyticsRepository;
 use crate::indexer::BlockIndexer;
 use crate::rpc::client::TaikoRpcClient;
 
@@ -33,14 +42,40 @@ async fn main() -> Result<()> {
     run_migrations(&pool)?;
     
     let rpc_client = TaikoRpcClient::new(&config.taiko_rpc_url, config.taiko_chain_id).await?;
-    let block_repo = BlockRepository::new(pool);
+    let block_repo = BlockRepository::new(pool.clone());
+    let analytics_repo = AddressAnalyticsRepository::new(pool);
     
-    let indexer = BlockIndexer::new(rpc_client, block_repo, config.batch_size);
+    let indexer = BlockIndexer::new(rpc_client, block_repo.clone(), analytics_repo.clone(), config.batch_size);
     
     let status = indexer.get_indexer_status().await?;
     info!("Indexer status: {:?}", status);
     
-    indexer.start_indexing().await?;
+    let app = create_router(block_repo, analytics_repo);
+    
+    let indexer_handle = tokio::spawn(async move {
+        if let Err(e) = indexer.start_indexing().await {
+            tracing::error!("Indexer failed: {}", e);
+        }
+    });
+    
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    info!("🚀 GraphQL server starting on http://localhost:3000");
+    info!("📊 GraphQL Playground available at http://localhost:3000");
+    info!("🔍 Health check at http://localhost:3000/health");
+    
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+            tracing::error!("Server failed: {}", e);
+        }
+    });
+    
+    tokio::select! {
+        _ = indexer_handle => info!("Indexer completed"),
+        _ = server_handle => info!("Server stopped"),
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received Ctrl+C, shutting down...");
+        }
+    }
     
     Ok(())
 }
