@@ -32,6 +32,7 @@ pub struct Transaction {
     pub access_list: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
+    pub direction: String,
 }
 
 #[derive(Debug, Clone, Insertable, Serialize, Deserialize)]
@@ -58,11 +59,24 @@ pub struct NewTransaction {
     pub effective_gas_price: Option<BigDecimal>,
     pub transaction_type: Option<i32>,
     pub access_list: Option<String>,
+    pub direction: String,
 }
 
 impl Transaction {
     pub fn is_contract_creation(&self) -> bool {
         self.to_address.is_none() && self.contract_address.is_some()
+    }
+    
+    pub fn is_outbound(&self) -> bool {
+        self.direction == "out"
+    }
+    
+    pub fn is_inbound(&self) -> bool {
+        self.direction == "in"
+    }
+    
+    pub fn is_internal(&self) -> bool {
+        self.direction == "inside"
     }
     
     pub fn is_successful(&self) -> bool {
