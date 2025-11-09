@@ -5,6 +5,7 @@ use tokio::time::{interval, sleep};
 use tracing::{error, info, warn};
 use futures::future::join_all;
 use std::sync::Arc;
+use std::collections::HashSet;
 use chrono::Utc;
 
 use crate::db::operations::BlockRepository;
@@ -13,12 +14,14 @@ use crate::rpc::client::TaikoRpcClient;
 use crate::rpc::types::{block_to_new_block, transaction_to_new_transaction};
 use crate::bridge::BridgeDetector;
 use crate::analytics::analytics::process_block_analytics;
+use crate::websocket::WebSocketBroadcaster;
 
 pub struct BlockIndexer {
     rpc_client: Arc<TaikoRpcClient>,
     block_repo: Arc<BlockRepository>,
     analytics_repo: Arc<AddressAnalyticsRepository>,
     bridge_detector: Arc<BridgeDetector>,
+    websocket_broadcaster: Arc<WebSocketBroadcaster>,
     batch_size: u64,
     concurrent_requests: usize,
 }
@@ -28,6 +31,7 @@ impl BlockIndexer {
         rpc_client: TaikoRpcClient,
         block_repo: BlockRepository,
         analytics_repo: AddressAnalyticsRepository,
+        websocket_broadcaster: Arc<WebSocketBroadcaster>,
         batch_size: u64,
     ) -> Self {
         Self {
@@ -35,6 +39,7 @@ impl BlockIndexer {
             block_repo: Arc::new(block_repo),
             analytics_repo: Arc::new(analytics_repo),
             bridge_detector: Arc::new(BridgeDetector::new()),
+            websocket_broadcaster,
             batch_size,
             concurrent_requests: 5, // Very conservative start
         }
@@ -100,6 +105,7 @@ impl BlockIndexer {
                 Arc::clone(&self.block_repo),
                 Arc::clone(&self.analytics_repo),
                 Arc::clone(&self.bridge_detector),
+                Arc::clone(&self.websocket_broadcaster),
                 block_num
             ).await {
                 Ok(_) => {
@@ -149,6 +155,7 @@ impl BlockIndexer {
         block_repo: Arc<BlockRepository>,
         analytics_repo: Arc<AddressAnalyticsRepository>,
         bridge_detector: Arc<BridgeDetector>,
+        websocket_broadcaster: Arc<WebSocketBroadcaster>,
         block_number: u64,
     ) -> Result<()> {
         // Check if block already exists
@@ -196,9 +203,16 @@ impl BlockIndexer {
                                         // Store receipts for analytics
                                         receipts_for_analytics = receipts;
                                         
-                                        match block_repo.insert_transactions_batch(new_transactions) {
+                                        match block_repo.insert_transactions_batch(new_transactions.clone()) {
                                             Ok(inserted_count) => {
                                                 info!("✅ Block {} with {} transactions (with receipts) processed", block_number, inserted_count);
+                                                
+                                                // 🌐 Broadcast each new transaction via WebSocket
+                                                for new_tx in &new_transactions {
+                                                    if let Ok(Some(db_tx)) = block_repo.get_transaction_by_hash(&new_tx.hash) {
+                                                        websocket_broadcaster.broadcast_new_transaction(db_tx).await;
+                                                    }
+                                                }
                                             },
                                             Err(e) => {
                                                 warn!("⚠️ Block {} stored but transaction insertion failed: {}", block_number, e);
@@ -224,7 +238,14 @@ impl BlockIndexer {
                                         // Use empty receipts for analytics
                                         receipts_for_analytics = vec![None; block.transactions.len()];
                                         
-                                        let _ = block_repo.insert_transactions_batch(new_transactions);
+                                        if let Ok(_) = block_repo.insert_transactions_batch(new_transactions.clone()) {
+                                            // 🌐 Broadcast each new transaction via WebSocket (fallback case)
+                                            for new_tx in &new_transactions {
+                                                if let Ok(Some(db_tx)) = block_repo.get_transaction_by_hash(&new_tx.hash) {
+                                                    websocket_broadcaster.broadcast_new_transaction(db_tx).await;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 
@@ -239,6 +260,22 @@ impl BlockIndexer {
                                     &receipts_for_analytics,
                                 ).await {
                                     warn!("Failed to process analytics for block {}: {}", block_number, e);
+                                }
+                            }
+                            
+                            // 🌐 Broadcast new block via WebSocket
+                            if let Ok(Some(db_block)) = block_repo.get_block_by_number(block_number as i64) {
+                                websocket_broadcaster.broadcast_new_block(db_block).await;
+                            }
+                            
+                            // 🌐 Broadcast updated stats via WebSocket
+                            if let Ok(total_blocks) = block_repo.get_block_count() {
+                                if let Ok(latest_block) = block_repo.get_latest_block_number() {
+                                    if let Ok(total_transactions) = block_repo.get_transaction_count() {
+                                        if let Ok(total_addresses) = block_repo.get_unique_address_count() {
+                                            websocket_broadcaster.broadcast_stats(total_blocks, latest_block, total_transactions, total_addresses).await;
+                                        }
+                                    }
                                 }
                             }
                             
@@ -350,7 +387,32 @@ impl BlockIndexer {
                                 new_transactions.push(new_tx);
                             }
                             
-                            let _ = self.block_repo.insert_transactions_batch(new_transactions);
+                            if let Ok(_) = self.block_repo.insert_transactions_batch(new_transactions.clone()) {
+                                // 🌐 Broadcast each new transaction via WebSocket (real-time)
+                                for new_tx in &new_transactions {
+                                    if let Ok(Some(db_tx)) = self.block_repo.get_transaction_by_hash(&new_tx.hash) {
+                                        self.websocket_broadcaster.broadcast_new_transaction(db_tx.clone()).await;
+                                        
+                                        // 🏠 Broadcast address activity
+                                        self.websocket_broadcaster.broadcast_address_activity(
+                                            db_tx.from_address.clone(),
+                                            db_tx.hash.clone(),
+                                            "sent".to_string()
+                                        ).await;
+                                        
+                                        if let Some(to_addr) = &db_tx.to_address {
+                                            self.websocket_broadcaster.broadcast_address_activity(
+                                                to_addr.clone(),
+                                                db_tx.hash.clone(),
+                                                "received".to_string()
+                                            ).await;
+                                        }
+                                    }
+                                }
+                                
+                                // 🆕 Check for new addresses and broadcast
+                                self.check_and_broadcast_new_addresses(&new_transactions).await;
+                            }
                             
                             // Process analytics after storing transactions  
                             let block_timestamp = block.timestamp.as_u64() as i64;
@@ -378,7 +440,32 @@ impl BlockIndexer {
                                 );
                                 new_transactions.push(new_tx);
                             }
-                            let _ = self.block_repo.insert_transactions_batch(new_transactions);
+                            if let Ok(_) = self.block_repo.insert_transactions_batch(new_transactions.clone()) {
+                                // 🌐 Broadcast each new transaction via WebSocket (real-time fallback)
+                                for new_tx in &new_transactions {
+                                    if let Ok(Some(db_tx)) = self.block_repo.get_transaction_by_hash(&new_tx.hash) {
+                                        self.websocket_broadcaster.broadcast_new_transaction(db_tx.clone()).await;
+                                        
+                                        // 🏠 Broadcast address activity
+                                        self.websocket_broadcaster.broadcast_address_activity(
+                                            db_tx.from_address.clone(),
+                                            db_tx.hash.clone(),
+                                            "sent".to_string()
+                                        ).await;
+                                        
+                                        if let Some(to_addr) = &db_tx.to_address {
+                                            self.websocket_broadcaster.broadcast_address_activity(
+                                                to_addr.clone(),
+                                                db_tx.hash.clone(),
+                                                "received".to_string()
+                                            ).await;
+                                        }
+                                    }
+                                }
+                                
+                                // 🆕 Check for new addresses and broadcast (fallback)
+                                self.check_and_broadcast_new_addresses(&new_transactions).await;
+                            }
                             
                             // Process analytics even without receipts
                             let block_timestamp = block.timestamp.as_u64() as i64;
@@ -392,6 +479,22 @@ impl BlockIndexer {
                                 &empty_receipts,
                             ).await {
                                 warn!("Failed to process analytics for block {}: {}", block_number, e);
+                            }
+                        }
+                    }
+                }
+                
+                // 🌐 Broadcast new block via WebSocket (real-time indexing)
+                if let Ok(Some(db_block)) = self.block_repo.get_block_by_number(block_number as i64) {
+                    self.websocket_broadcaster.broadcast_new_block(db_block).await;
+                }
+                
+                // 🌐 Broadcast updated stats via WebSocket (real-time indexing)
+                if let Ok(total_blocks) = self.block_repo.get_block_count() {
+                    if let Ok(latest_block) = self.block_repo.get_latest_block_number() {
+                        if let Ok(total_transactions) = self.block_repo.get_transaction_count() {
+                            if let Ok(total_addresses) = self.block_repo.get_unique_address_count() {
+                                self.websocket_broadcaster.broadcast_stats(total_blocks, latest_block, total_transactions, total_addresses).await;
                             }
                         }
                     }
@@ -421,6 +524,29 @@ impl BlockIndexer {
             total_blocks,
             is_synced: latest_db_block.map_or(false, |db| db as u64 >= latest_rpc_block),
         })
+    }
+
+    /// Check for new addresses in transactions and broadcast new address events
+    async fn check_and_broadcast_new_addresses(&self, new_transactions: &[crate::models::transaction::NewTransaction]) {
+        let mut addresses_in_block = HashSet::new();
+        
+        // Collect all unique addresses from this block's transactions
+        for tx in new_transactions {
+            addresses_in_block.insert(&tx.from_address);
+            if let Some(to_addr) = &tx.to_address {
+                addresses_in_block.insert(to_addr);
+            }
+        }
+        
+        // Check if each address is new (first time seen)
+        for address in addresses_in_block {
+            if let Ok(count) = self.block_repo.get_transactions_count_by_address(address) {
+                // If this address has only 1 transaction, it's a new address
+                if count == 1 {
+                    self.websocket_broadcaster.broadcast_new_address(address.clone()).await;
+                }
+            }
+        }
     }
 }
 
