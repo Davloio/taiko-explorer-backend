@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.40", features = ["full", "sync"] }
 futures = "0.3"
 diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "numeric"] }
 async-graphql = "7.0"
@@ -28,6 +28,10 @@ deadpool = "0.12"
 deadpool-diesel = "0.6"
 bigdecimal = { version = "0.4", features = ["serde"] }
 hex = "0.4"
+tokio-tungstenite = "0.28.0"
+axum-tungstenite = "0.3.0"
+futures-util = "0.3.31"
+uuid = { version = "1.18.1", features = ["v4"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
