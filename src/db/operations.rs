@@ -1,11 +1,30 @@
 use anyhow::Result;
+use bigdecimal::BigDecimal;
 use diesel::prelude::*;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::db::connection::DbPool;
 use crate::models::block::{Block, NewBlock};
 use crate::models::transaction::{Transaction, NewTransaction};
 use crate::schema::{blocks, transactions};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityInfo {
+    pub block_number: i64,
+    pub transaction_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressProfile {
+    pub address: String,
+    pub total_transactions: i64,
+    pub first_activity: Option<ActivityInfo>,
+    pub last_activity: Option<ActivityInfo>,
+    pub total_sent: BigDecimal,
+    pub total_received: BigDecimal,
+    pub total_gas_fees: BigDecimal,
+}
 
 #[derive(Clone)]
 pub struct BlockRepository {
@@ -177,6 +196,55 @@ impl BlockRepository {
         Ok(transactions_list)
     }
 
+    pub fn get_transactions_paginated_filtered(&self, limit: i64, offset: i64, order_desc: bool, status_filter: Option<i32>, direction_filter: Option<&str>) -> Result<Vec<Transaction>> {
+        let mut conn = self.pool.get()?;
+        
+        let mut query = transactions::table.into_boxed();
+        
+        // Apply status filter
+        if let Some(status) = status_filter {
+            query = query.filter(transactions::status.eq(status));
+        }
+        
+        // Apply direction filter
+        if let Some(direction) = direction_filter {
+            query = query.filter(transactions::direction.eq(direction));
+        }
+        
+        // Apply ordering
+        if order_desc {
+            query = query.order(transactions::block_number.desc());
+        } else {
+            query = query.order(transactions::block_number.asc());
+        }
+        
+        let transactions_list = query
+            .limit(limit)
+            .offset(offset)
+            .load::<Transaction>(&mut conn)?;
+        
+        Ok(transactions_list)
+    }
+    
+    pub fn get_transaction_count_filtered(&self, status_filter: Option<i32>, direction_filter: Option<&str>) -> Result<i64> {
+        let mut conn = self.pool.get()?;
+        
+        let mut query = transactions::table.into_boxed();
+        
+        // Apply status filter
+        if let Some(status) = status_filter {
+            query = query.filter(transactions::status.eq(status));
+        }
+        
+        // Apply direction filter
+        if let Some(direction) = direction_filter {
+            query = query.filter(transactions::direction.eq(direction));
+        }
+        
+        let count = query.count().get_result::<i64>(&mut conn)?;
+        Ok(count)
+    }
+
     pub fn get_transactions_paginated(&self, limit: i64, offset: i64, order_desc: bool) -> Result<Vec<Transaction>> {
         let mut conn = self.pool.get()?;
         
@@ -220,6 +288,127 @@ impl BlockRepository {
         Ok(count)
     }
 
+    pub fn get_transactions_by_address_filtered(&self, address: &str, limit: i64, offset: i64, status_filter: Option<i32>, direction_filter: Option<&str>) -> Result<Vec<Transaction>> {
+        let mut conn = self.pool.get()?;
+        
+        let mut query = transactions::table
+            .filter(
+                transactions::from_address.eq(address)
+                    .or(transactions::to_address.eq(address))
+            )
+            .into_boxed();
+        
+        // Apply status filter
+        if let Some(status) = status_filter {
+            query = query.filter(transactions::status.eq(status));
+        }
+        
+        // Apply direction filter
+        if let Some(direction) = direction_filter {
+            query = query.filter(transactions::direction.eq(direction));
+        }
+        
+        let transactions_list = query
+            .order(transactions::block_number.desc())
+            .limit(limit)
+            .offset(offset)
+            .load::<Transaction>(&mut conn)?;
+        
+        Ok(transactions_list)
+    }
+
+    pub fn get_transactions_count_by_address_filtered(&self, address: &str, status_filter: Option<i32>, direction_filter: Option<&str>) -> Result<i64> {
+        let mut conn = self.pool.get()?;
+        
+        let mut query = transactions::table
+            .filter(
+                transactions::from_address.eq(address)
+                    .or(transactions::to_address.eq(address))
+            )
+            .into_boxed();
+        
+        // Apply status filter
+        if let Some(status) = status_filter {
+            query = query.filter(transactions::status.eq(status));
+        }
+        
+        // Apply direction filter
+        if let Some(direction) = direction_filter {
+            query = query.filter(transactions::direction.eq(direction));
+        }
+        
+        let count = query.count().get_result::<i64>(&mut conn)?;
+        
+        Ok(count)
+    }
+
+    pub fn get_address_profile(&self, address: &str) -> Result<AddressProfile> {
+        let mut conn = self.pool.get()?;
+        
+        // Get total transaction count
+        let total_transactions = self.get_transactions_count_by_address(address)?;
+        
+        // Get first and last activity
+        let first_activity = transactions::table
+            .filter(
+                transactions::from_address.eq(address)
+                .or(transactions::to_address.eq(address))
+            )
+            .order(transactions::block_number.asc())
+            .select((transactions::block_number, transactions::hash))
+            .first::<(i64, String)>(&mut conn)
+            .optional()?;
+            
+        let last_activity = transactions::table
+            .filter(
+                transactions::from_address.eq(address)
+                .or(transactions::to_address.eq(address))
+            )
+            .order(transactions::block_number.desc())
+            .select((transactions::block_number, transactions::hash))
+            .first::<(i64, String)>(&mut conn)
+            .optional()?;
+        
+        // Calculate total volume sent and received
+        let sent_volume = transactions::table
+            .filter(transactions::from_address.eq(address))
+            .select(diesel::dsl::sum(transactions::value))
+            .first::<Option<BigDecimal>>(&mut conn)?
+            .unwrap_or_else(|| BigDecimal::from(0));
+            
+        let received_volume = transactions::table
+            .filter(transactions::to_address.eq(address))
+            .select(diesel::dsl::sum(transactions::value))
+            .first::<Option<BigDecimal>>(&mut conn)?
+            .unwrap_or_else(|| BigDecimal::from(0));
+        
+        // Calculate total gas fees
+        let total_gas_fees = transactions::table
+            .filter(transactions::from_address.eq(address))
+            .filter(transactions::gas_price.is_not_null())
+            .filter(transactions::gas_used.is_not_null())
+            .load::<Transaction>(&mut conn)?
+            .iter()
+            .map(|tx| {
+                if let (Some(gas_price), Some(gas_used)) = (&tx.gas_price, &tx.gas_used) {
+                    gas_price * BigDecimal::from(*gas_used)
+                } else {
+                    BigDecimal::from(0)
+                }
+            })
+            .sum::<BigDecimal>();
+        
+        Ok(AddressProfile {
+            address: address.to_string(),
+            total_transactions,
+            first_activity: first_activity.map(|(block, hash)| ActivityInfo { block_number: block, transaction_hash: hash }),
+            last_activity: last_activity.map(|(block, hash)| ActivityInfo { block_number: block, transaction_hash: hash }),
+            total_sent: sent_volume,
+            total_received: received_volume,
+            total_gas_fees,
+        })
+    }
+
     pub fn get_failed_transactions(&self, limit: i64) -> Result<Vec<Transaction>> {
         let mut conn = self.pool.get()?;
         
@@ -246,4 +435,139 @@ impl BlockRepository {
         
         Ok(transactions_list)
     }
+
+    pub fn get_unique_address_count(&self) -> Result<i64> {
+        let mut conn = self.pool.get()?;
+        
+        // Count unique from_address
+        let from_count = transactions::table
+            .select(transactions::from_address)
+            .distinct()
+            .count()
+            .get_result::<i64>(&mut conn)?;
+        
+        // Count unique to_address (excluding NULL)
+        let to_count = transactions::table
+            .filter(transactions::to_address.is_not_null())
+            .select(transactions::to_address)
+            .distinct()
+            .count()
+            .get_result::<i64>(&mut conn)?;
+        
+        // Use raw SQL to get accurate count of all unique addresses
+        use diesel::sql_types::BigInt;
+        #[derive(QueryableByName)]
+        struct AddressCount {
+            #[diesel(sql_type = BigInt)]
+            count: i64,
+        }
+        
+        let result = diesel::sql_query(
+            "SELECT COUNT(*) as count FROM (
+                SELECT from_address FROM transactions
+                UNION
+                SELECT to_address FROM transactions WHERE to_address IS NOT NULL
+            ) AS unique_addresses"
+        )
+        .get_result::<AddressCount>(&mut conn)?;
+        
+        Ok(result.count)
+    }
+
+    pub fn get_address_growth_chart(&self, _days: Option<i32>) -> Result<Vec<(String, i32, i32)>> {
+        let mut conn = self.pool.get()?;
+        
+        // Always use ALL TIME data - simplified query for 10 data points
+        let query = "
+            WITH time_bounds AS (
+                SELECT 
+                    DATE(to_timestamp(MIN(b.timestamp))) as start_date,
+                    DATE(to_timestamp(MAX(b.timestamp))) as end_date
+                FROM blocks b
+            ),
+            date_series AS (
+                -- Generate exactly 10 evenly spaced data points
+                SELECT 
+                    (tb.start_date + (n * (tb.end_date - tb.start_date) / GREATEST(9, 1)))::date as period_date
+                FROM time_bounds tb
+                CROSS JOIN generate_series(0, 9) as n
+            ),
+            daily_unique_addresses AS (
+                -- Get all unique addresses per day (no double counting)
+                SELECT 
+                    DATE(to_timestamp(b.timestamp)) as date,
+                    t.from_address as address
+                FROM transactions t
+                JOIN blocks b ON t.block_number = b.number
+                WHERE t.from_address IS NOT NULL
+                
+                UNION
+                
+                SELECT 
+                    DATE(to_timestamp(b.timestamp)) as date,
+                    t.to_address as address
+                FROM transactions t
+                JOIN blocks b ON t.block_number = b.number
+                WHERE t.to_address IS NOT NULL
+            ),
+            daily_totals AS (
+                -- Count truly unique addresses per day
+                SELECT 
+                    date,
+                    COUNT(DISTINCT address) as daily_new_count
+                FROM daily_unique_addresses
+                GROUP BY date
+                ORDER BY date
+            ),
+            cumulative_totals AS (
+                -- Calculate running totals up to each date
+                SELECT 
+                    date,
+                    SUM(daily_new_count) OVER (ORDER BY date) as cumulative_count
+                FROM daily_totals
+            ),
+            period_data AS (
+                -- Get the cumulative total for each period date
+                SELECT 
+                    ds.period_date,
+                    COALESCE(MAX(ct.cumulative_count), 0)::bigint as total_addresses_at_date
+                FROM date_series ds
+                LEFT JOIN cumulative_totals ct ON ct.date <= ds.period_date
+                GROUP BY ds.period_date
+                ORDER BY ds.period_date
+            )
+            SELECT 
+                period_date::text as date,
+                COALESCE(total_addresses_at_date - LAG(total_addresses_at_date, 1, 0) OVER (ORDER BY period_date), total_addresses_at_date)::bigint as new_addresses,
+                total_addresses_at_date as total_addresses
+            FROM period_data
+            ORDER BY period_date";
+
+        // Execute raw SQL query
+        let results = diesel::sql_query(query)
+            .load::<DailyAddressCount>(&mut conn)?;
+
+        // Convert to the required format - totals already calculated in SQL
+        let mut chart_data = Vec::new();
+
+        for result in results {
+            chart_data.push((
+                format!("{}T00:00:00Z", result.date), // Convert to ISO timestamp
+                result.total_addresses as i32, // Total addresses (cumulative)
+                result.new_addresses as i32, // New addresses in this period
+            ));
+        }
+
+        Ok(chart_data)
+    }
+}
+
+#[derive(QueryableByName)]
+struct DailyAddressCount {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    date: String,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    new_addresses: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    total_addresses: i64,
 }
