@@ -2,6 +2,7 @@
 name = "taiko-explorer-backend"
 version = "0.1.0"
 edition = "2021"
+default-run = "taiko-explorer-backend"
 
 [dependencies]
 tokio = { version = "1.40", features = ["full", "sync"] }
@@ -32,6 +33,7 @@ tokio-tungstenite = "0.28.0"
 axum-tungstenite = "0.3.0"
 futures-util = "0.3.31"
 uuid = { version = "1.18.1", features = ["v4"] }
+reqwest = { version = "0.12.24", features = ["json"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -3,7 +3,7 @@ mod bridge;
 mod config;
 mod db;
 mod graphql;
-mod indexer;
+mod mega_batch_indexer;
 mod models;
 mod rpc;
 mod schema;
@@ -23,8 +23,7 @@ use crate::config::Config;
 use crate::db::connection::establish_connection;
 use crate::db::operations::BlockRepository;
 use crate::db::address_analytics::AddressAnalyticsRepository;
-use crate::indexer::BlockIndexer;
-use crate::rpc::client::TaikoRpcClient;
+use crate::mega_batch_indexer::MegaBatchIndexer;
 use crate::websocket::WebSocketBroadcaster;
 use std::sync::Arc;
 
@@ -37,34 +36,33 @@ async fn main() -> Result<()> {
     init_logging(&config.log_level)?;
     
     info!("Starting Taiko Explorer Backend");
-    info!("RPC URL: {}", config.taiko_rpc_url);
     info!("Chain ID: {}", config.taiko_chain_id);
     
     let pool = establish_connection();
     
     run_migrations(&pool)?;
     
-    let rpc_client = TaikoRpcClient::new(&config.taiko_rpc_url, config.taiko_chain_id).await?;
+    // Initialize repositories and WebSocket broadcaster
+    info!("🔧 Initializing database repositories and WebSocket broadcaster");
     let block_repo = BlockRepository::new(pool.clone());
     let analytics_repo = AddressAnalyticsRepository::new(pool);
     let websocket_broadcaster = Arc::new(WebSocketBroadcaster::new());
     
-    let indexer = BlockIndexer::new(
-        rpc_client, 
+    // Initialize MEGA BATCH indexer - aggressive batch processing
+    info!("🚀 Initializing MEGA BATCH INDEXER");
+    info!("🎯 AGGRESSIVE settings: 1000-block batches, 1000-receipt mega batches, ultra-massive bulk storage");
+    let indexer = MegaBatchIndexer::new(
         block_repo.clone(), 
         analytics_repo.clone(), 
         websocket_broadcaster.clone(),
-        config.batch_size
-    );
-    
-    let status = indexer.get_indexer_status().await?;
-    info!("Indexer status: {:?}", status);
+        config.taiko_rpc_nodes
+    ).await?;
     
     let app = create_router(block_repo, analytics_repo, websocket_broadcaster.clone());
     
     let indexer_handle = tokio::spawn(async move {
-        if let Err(e) = indexer.start_indexing().await {
-            tracing::error!("Indexer failed: {}", e);
+        if let Err(e) = indexer.start_mega_batching().await {
+            tracing::error!("MEGA BATCH indexer failed: {}", e);
         }
     });
     
@@ -72,6 +70,7 @@ async fn main() -> Result<()> {
     info!("🚀 GraphQL server starting on http://localhost:3000");
     info!("📊 GraphQL Playground available at http://localhost:3000");
     info!("🔍 Health check at http://localhost:3000/health");
+    info!("🚀 MEGA BATCH indexer: 1000-block batches, ultra-aggressive performance, massive bulk operations");
     
     let server_handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app.into_make_service()).await {

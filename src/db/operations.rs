@@ -49,7 +49,6 @@ impl BlockRepository {
         match block {
             Some(b) => Ok(b),
             None => {
-                // Block already exists, fetch it
                 self.get_block_by_number(new_block.number)?.ok_or_else(|| {
                     anyhow::anyhow!("Failed to insert or fetch block {}", new_block.number)
                 })
@@ -67,6 +66,10 @@ impl BlockRepository {
             .execute(&mut conn)?;
         
         Ok(inserted)
+    }
+
+    pub fn insert_blocks_bulk(&self, new_blocks: Vec<NewBlock>) -> Result<usize> {
+        self.insert_blocks_batch(new_blocks)
     }
 
     pub fn get_latest_block_number(&self) -> Result<Option<i64>> {
@@ -156,6 +159,10 @@ impl BlockRepository {
             .execute(&mut conn)?;
         
         Ok(inserted)
+    }
+
+    pub fn insert_transactions_bulk(&self, new_transactions: Vec<NewTransaction>) -> Result<usize> {
+        self.insert_transactions_batch(new_transactions)
     }
 
     pub fn get_transaction_by_hash(&self, tx_hash: &str) -> Result<Option<Transaction>> {
@@ -510,14 +517,22 @@ impl BlockRepository {
                 JOIN blocks b ON t.block_number = b.number
                 WHERE t.to_address IS NOT NULL
             ),
-            daily_totals AS (
-                -- Count truly unique addresses per day
+            first_appearances AS (
+                -- Get the first time each address appeared
                 SELECT 
-                    date,
-                    COUNT(DISTINCT address) as daily_new_count
+                    address,
+                    MIN(date) as first_seen_date
                 FROM daily_unique_addresses
-                GROUP BY date
-                ORDER BY date
+                GROUP BY address
+            ),
+            daily_totals AS (
+                -- Count truly new addresses per day (first appearance only)
+                SELECT 
+                    first_seen_date as date,
+                    COUNT(*) as daily_new_count
+                FROM first_appearances
+                GROUP BY first_seen_date
+                ORDER BY first_seen_date
             ),
             cumulative_totals AS (
                 -- Calculate running totals up to each date
