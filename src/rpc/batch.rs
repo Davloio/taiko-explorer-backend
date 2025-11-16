@@ -4,7 +4,6 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use tracing::{info, warn, error};
 
-/// JSON-RPC batch request handler for optimized receipt fetching
 pub struct BatchRpcClient {
     client: reqwest::Client,
     base_url: String,
@@ -18,8 +17,6 @@ impl BatchRpcClient {
         }
     }
 
-    /// Fetch transaction receipts in batches - PURE BATCH MODE, NO FALLBACK
-    /// **KEY INSIGHT:** A batch of 100 requests = 1 HTTP request = 1 rate limit count!
     pub async fn get_receipts_batch(&self, tx_hashes: Vec<H256>, batch_size: usize) -> Result<Vec<Option<TransactionReceipt>>> {
         if tx_hashes.is_empty() {
             return Ok(Vec::new());
@@ -27,7 +24,6 @@ impl BatchRpcClient {
 
         let mut all_receipts = Vec::with_capacity(tx_hashes.len());
         
-        // Process in chunks - pure batch mode
         for chunk in tx_hashes.chunks(batch_size) {
             info!("📦 Fetching batch of {} receipts (NO FALLBACK)", chunk.len());
             
@@ -41,9 +37,7 @@ impl BatchRpcClient {
         Ok(all_receipts)
     }
 
-    /// Send a batch JSON-RPC request for receipts
     async fn fetch_receipt_batch(&self, tx_hashes: &[H256]) -> Result<Vec<Option<TransactionReceipt>>> {
-        // Create batch JSON-RPC request
         let mut batch_request = Vec::new();
         
         for (id, tx_hash) in tx_hashes.iter().enumerate() {
@@ -57,7 +51,6 @@ impl BatchRpcClient {
 
         let start_time = std::time::Instant::now();
 
-        // Send the batch request
         let response = self.client
             .post(&self.base_url)
             .header("Content-Type", "application/json")
@@ -75,11 +68,9 @@ impl BatchRpcClient {
 
         let batch_response: Value = response.json().await?;
         
-        // Parse batch response
         self.parse_batch_response(batch_response, tx_hashes.len()).await
     }
 
-    /// Parse batch response and extract receipts
     async fn parse_batch_response(&self, response: Value, expected_count: usize) -> Result<Vec<Option<TransactionReceipt>>> {
         let mut receipts = vec![None; expected_count];
 
@@ -92,7 +83,6 @@ impl BatchRpcClient {
                         if index < expected_count {
                             if let Some(result) = response_item["result"].as_object() {
                                 if !result.is_empty() {
-                                    // Parse the receipt
                                     match serde_json::from_value::<TransactionReceipt>(response_item["result"].clone()) {
                                         Ok(receipt) => {
                                             receipts[index] = Some(receipt);
@@ -117,7 +107,6 @@ impl BatchRpcClient {
         Ok(receipts)
     }
 
-    /// Fallback: fetch single receipt
     async fn get_single_receipt(&self, tx_hash: H256) -> Result<Option<TransactionReceipt>> {
         let request = json!({
             "jsonrpc": "2.0",
@@ -153,9 +142,8 @@ impl BatchRpcClient {
         }
     }
 
-    /// Test batch capabilities with different batch sizes
     pub async fn test_batch_limits(&self) -> Result<BatchCapabilities> {
-        let test_hash = H256::from_low_u64_be(1); // Dummy hash for testing
+        let test_hash = H256::from_low_u64_be(1);
         let test_sizes = vec![1, 10, 50, 100, 500, 1000];
         
         let mut max_batch_size = 1;
@@ -177,7 +165,6 @@ impl BatchRpcClient {
                     results.insert(size, rps);
                     max_batch_size = size;
                     
-                    // Find optimal (best throughput)
                     if let Some(&current_best) = results.get(&optimal_batch_size) {
                         if rps > current_best {
                             optimal_batch_size = size;
@@ -190,7 +177,6 @@ impl BatchRpcClient {
                 }
             }
             
-            // Cool down between tests
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
@@ -223,7 +209,6 @@ impl BatchCapabilities {
             info!("   Batch {}: {:.1} receipts/second", size, rps);
         }
 
-        // Calculate theoretical performance
         if let Some(&optimal_rps) = self.throughput_results.get(&self.optimal_batch_size) {
             let blocks_per_second_10tx = optimal_rps / 10.0;
             let blocks_per_second_40tx = optimal_rps / 40.0;

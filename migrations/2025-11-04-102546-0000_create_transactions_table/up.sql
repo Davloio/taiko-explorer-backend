@@ -27,7 +27,6 @@ CREATE TABLE transactions (
     FOREIGN KEY (block_number) REFERENCES blocks(number) ON DELETE CASCADE
 );
 
--- Indexes for performance
 CREATE INDEX idx_transactions_hash ON transactions(hash);
 CREATE INDEX idx_transactions_block_number ON transactions(block_number);
 CREATE INDEX idx_transactions_block_hash ON transactions(block_hash);
@@ -38,6 +37,5 @@ CREATE INDEX idx_transactions_created_at ON transactions(created_at);
 CREATE INDEX idx_transactions_value ON transactions(value);
 CREATE INDEX idx_transactions_gas_used ON transactions(gas_used);
 
--- Composite indexes for common queries
 CREATE INDEX idx_transactions_block_tx_index ON transactions(block_number, transaction_index);
 CREATE INDEX idx_transactions_from_to ON transactions(from_address, to_address);

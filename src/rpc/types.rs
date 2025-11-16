@@ -4,24 +4,22 @@ use crate::models::block::NewBlock;
 use crate::models::transaction::NewTransaction;
 use std::str::FromStr;
 
-// Bridge contract addresses for direction detection
 const TAIKO_L1_BRIDGE_CONTRACTS: &[&str] = &[
-    "0xd60247c6848b7ca29eddf63aa924e53db6ddd8ec",  // Main L1 bridge
-    "0x1670000000000000000000000000000000000001",  // L2 bridge
-    "0x0000777700000000000000000000000000000001",  // Signal service
-    "0xEf9EaA1dd30a9AA1df01c36411b5F082aA65fBaa",  // Taiko Token Bridge
-    "0xa51894664a773981c6c112c43ce576f315d5b1b6",  // Taiko: WETH Token (withdrawal contract)
+    "0xd60247c6848b7ca29eddf63aa924e53db6ddd8ec",
+    "0x1670000000000000000000000000000000000001",
+    "0x0000777700000000000000000000000000000001",
+    "0xEf9EaA1dd30a9AA1df01c36411b5F082aA65fBaa",
+    "0xa51894664a773981c6c112c43ce576f315d5b1b6",
 ];
 
-// Taiko bridge function selectors (validated with TaikoScan)
 const DEPOSIT_SELECTORS: &[&str] = &[
-    "0x2035065e",  // processMessage - L1→L2 deposits (IN to Taiko) 
-    "0x1bdb0037",  // sendMessage - L1→L2 deposits (IN to Taiko)
-    "0xd0e30db0",  // deposit() - WETH deposits (IN to Taiko)
+    "0x2035065e",
+    "0x1bdb0037",
+    "0xd0e30db0",
 ];
 
 const WITHDRAW_SELECTORS: &[&str] = &[
-    "0x2e1a7d4d",  // withdraw(uint256) - WETH withdrawals (OUT from Taiko) - validated with TaikoScan
+    "0x2e1a7d4d",
 ];
 
 fn determine_transaction_direction(
@@ -30,7 +28,6 @@ fn determine_transaction_direction(
     input_data: &[u8],
     receipt: Option<&TransactionReceipt>
 ) -> String {
-    // Check if it involves bridge contracts
     let is_from_bridge = TAIKO_L1_BRIDGE_CONTRACTS.iter().any(|&addr| 
         from_address.to_lowercase() == addr.to_lowercase()
     );
@@ -41,7 +38,6 @@ fn determine_transaction_direction(
         )
     );
     
-    // Check for specific bridge function calls by analyzing the function selector
     let (is_deposit_call, is_withdraw_call) = if input_data.len() >= 4 {
         let selector = format!("0x{}", hex::encode(&input_data[0..4]));
         let is_deposit = DEPOSIT_SELECTORS.iter().any(|&sel| sel == selector);
@@ -51,7 +47,6 @@ fn determine_transaction_direction(
         (false, false)
     };
     
-    // Analyze logs for bridge events if we have receipt
     let has_bridge_events = if let Some(receipt) = receipt {
         receipt.logs.iter().any(|log| {
             TAIKO_L1_BRIDGE_CONTRACTS.iter().any(|&addr| 
@@ -62,25 +57,19 @@ fn determine_transaction_direction(
         false
     };
     
-    // Enhanced direction detection logic
-    // Taiko is L2, so we determine direction from Taiko's perspective:
     
-    // HIGH PRIORITY: Explicit withdraw function calls (WETH withdrawals, bridge withdrawals)
     if is_withdraw_call && is_to_bridge {
-        return "out".to_string(); // L2→L1 withdrawal = OUT (money leaving Taiko)
+        return "out".to_string();
     }
     
-    // HIGH PRIORITY: Explicit deposit function calls (bridge deposits, WETH deposits)
     if is_deposit_call && is_to_bridge {
-        return "in".to_string(); // L1→L2 deposit = IN (money coming into Taiko)
+        return "in".to_string();
     }
     
-    // FALLBACK: Bridge-related but no specific function detected = internal
     if is_to_bridge || is_from_bridge || has_bridge_events {
-        return "inside".to_string(); // Bridge admin functions, etc.
+        return "inside".to_string();
     }
     
-    // DEFAULT: All other transactions = internal
     "inside".to_string()
 }
 
@@ -135,7 +124,6 @@ pub fn transaction_to_new_transaction(
         (None, None, None, None, Some(0), None)
     };
 
-    // Determine transaction direction
     let from_address = format!("0x{:x}", tx.from);
     let to_address_str = tx.to.map(|to| format!("0x{:x}", to));
     let direction = determine_transaction_direction(

@@ -17,11 +17,10 @@ use crate::bridge::BridgeDetector;
 use crate::analytics::analytics::process_block_analytics;
 use crate::websocket::WebSocketBroadcaster;
 
-/// MEGA AGGRESSIVE batch indexer - processes hundreds of blocks at once
 pub struct MegaBatchIndexer {
     nodes: Vec<Arc<TaikoRpcClient>>,
     batch_clients: Vec<Arc<BatchRpcClient>>,
-    node_urls: Vec<String>,  // Store original URLs for WebSocket connections
+    node_urls: Vec<String>,
     block_repo: Arc<BlockRepository>,
     analytics_repo: Arc<AddressAnalyticsRepository>,
     bridge_detector: Arc<BridgeDetector>,
@@ -35,7 +34,6 @@ impl MegaBatchIndexer {
         websocket_broadcaster: Arc<WebSocketBroadcaster>,
         working_nodes: Vec<String>,
     ) -> Result<Self> {
-        
         let mut nodes = Vec::new();
         let mut batch_clients = Vec::new();
         let mut node_urls = Vec::new();
@@ -64,8 +62,6 @@ impl MegaBatchIndexer {
             websocket_broadcaster,
         })
     }
-    
-    /// MEGA AGGRESSIVE indexing - process 1000+ blocks in massive batches
     pub async fn start_mega_batching(&self) -> Result<()> {
         info!("🚀 STARTING MEGA BATCH INDEXER");
         info!("🎯 Target: 1000 blocks per batch, instant DB storage");
@@ -77,18 +73,14 @@ impl MegaBatchIndexer {
             
             info!("📊 DB: {}, RPC: {}, Behind: {} blocks", latest_db_block, latest_rpc_block, blocks_behind);
             
-            if blocks_behind <= 5 {  // Within 5 blocks of head = essentially caught up
+            if blocks_behind <= 5 {
                 info!("🎯 Caught up! Switching to LIVE MODE with WebSocket subscription");
-                
-                // Enter live mode with WebSocket subscription
                 match self.run_live_mode().await {
                     Ok(_) => info!("Live mode ended, returning to batch mode"),
                     Err(e) => error!("Live mode failed: {}, falling back to batch mode", e),
                 }
                 continue;
             }
-            
-            // MEGA BATCH: Process up to 1000 blocks at once - ULTRA AGGRESSIVE
             let batch_size = std::cmp::min(1000, blocks_behind);
             let start_block = latest_db_block as u64 + 1;
             let end_block = start_block + batch_size - 1;
@@ -110,20 +102,14 @@ impl MegaBatchIndexer {
             }
         }
     }
-    
-    /// Process a massive batch of blocks (up to 1000)
     async fn process_mega_batch(&self, start_block: u64, end_block: u64) -> Result<u64> {
         let batch_size = end_block - start_block + 1;
         info!("📦 MEGA BATCH: Fetching {} blocks", batch_size);
-        
-        // Step 1: Fetch ALL block headers in parallel (super fast)
         let fetch_start = Instant::now();
         let blocks = self.fetch_blocks_mega_parallel(start_block, end_block).await?;
         let fetch_duration = fetch_start.elapsed();
         info!("⚡ Block headers fetched in {:.2}s ({:.1} blocks/second)", 
               fetch_duration.as_secs_f64(), batch_size as f64 / fetch_duration.as_secs_f64());
-        
-        // Step 2: Extract ALL transaction hashes
         let mut all_tx_hashes = Vec::new();
         for block in &blocks {
             for tx in &block.transactions {
@@ -132,15 +118,11 @@ impl MegaBatchIndexer {
         }
         
         info!("📦 Total transactions to fetch receipts: {}", all_tx_hashes.len());
-        
-        // Step 3: Fetch ALL receipts in massive batches (1000 receipts per call)
         let receipt_start = Instant::now();
         let all_receipts = self.fetch_receipts_ultra_batch(all_tx_hashes).await?;
         let receipt_duration = receipt_start.elapsed();
         info!("⚡ All receipts fetched in {:.2}s ({:.1} receipts/second)", 
               receipt_duration.as_secs_f64(), all_receipts.len() as f64 / receipt_duration.as_secs_f64());
-        
-        // Step 4: Process and store EVERYTHING in bulk
         let store_start = Instant::now();
         let processed = self.bulk_store_everything(blocks, all_receipts).await?;
         let store_duration = store_start.elapsed();
@@ -149,8 +131,6 @@ impl MegaBatchIndexer {
         
         Ok(processed)
     }
-    
-    /// Fetch blocks in massive parallel - use all nodes simultaneously
     async fn fetch_blocks_mega_parallel(&self, start_block: u64, end_block: u64) -> Result<Vec<ethers::types::Block<ethers::types::Transaction>>> {
         let batch_size = end_block - start_block + 1;
         let blocks_per_node = (batch_size + self.nodes.len() as u64 - 1) / self.nodes.len() as u64;
@@ -165,8 +145,6 @@ impl MegaBatchIndexer {
                 let node_clone = node.clone();
                 let task = tokio::spawn(async move {
                     let mut node_blocks = Vec::new();
-                    
-                    // Fetch blocks in chunks of 50 to avoid RPC limits
                     for chunk_start in (node_start..=node_end).step_by(50) {
                         let chunk_end = std::cmp::min(chunk_start + 49, node_end);
                         
@@ -187,8 +165,6 @@ impl MegaBatchIndexer {
                                 Err(e) => error!("Task failed: {}", e),
                             }
                         }
-                        
-                        // Small delay to be nice to the RPC
                         if chunk_end < node_end {
                             tokio::time::sleep(Duration::from_millis(50)).await;
                         }
@@ -200,8 +176,6 @@ impl MegaBatchIndexer {
                 fetch_tasks.push(task);
             }
         }
-        
-        // Collect all blocks from all nodes
         let mut all_blocks = Vec::new();
         let results = join_all(fetch_tasks).await;
         
@@ -211,25 +185,17 @@ impl MegaBatchIndexer {
                 Err(e) => error!("Node fetch task failed: {}", e),
             }
         }
-        
-        // Sort blocks by number
         all_blocks.sort_by_key(|b| b.number.unwrap_or_default());
         
         Ok(all_blocks)
     }
-    
-    /// Fetch receipts in ultra-massive batches (1000+ receipts per call)
     async fn fetch_receipts_ultra_batch(&self, tx_hashes: Vec<ethers::types::H256>) -> Result<Vec<Option<ethers::types::TransactionReceipt>>> {
         if tx_hashes.is_empty() {
             return Ok(Vec::new());
         }
         
         info!("🚀 ULTRA BATCH: Fetching {} receipts in batches of 1000", tx_hashes.len());
-        
-        // Use the fastest node for receipts
         let batch_client = &self.batch_clients[0];
-        
-        // Fetch in chunks of 1000 receipts - this is the key optimization!
         let chunk_size = 1000;
         let mut all_receipts = Vec::with_capacity(tx_hashes.len());
         
@@ -237,15 +203,11 @@ impl MegaBatchIndexer {
             info!("📦 Fetching batch of {} receipts", chunk.len());
             let receipts = batch_client.get_receipts_batch(chunk.to_vec(), chunk.len()).await?;
             all_receipts.extend(receipts);
-            
-            // Tiny delay to avoid overwhelming the node
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         
         Ok(all_receipts)
     }
-    
-    /// Store everything in massive bulk operations
     async fn bulk_store_everything(
         &self,
         blocks: Vec<ethers::types::Block<ethers::types::Transaction>>,
@@ -257,8 +219,6 @@ impl MegaBatchIndexer {
         let mut all_new_transactions = Vec::new();
         let mut all_new_addresses = std::collections::HashSet::new();
         let mut receipt_idx = 0;
-        
-        // Process all blocks and transactions into bulk inserts
         for block in &blocks {
             let new_block = block_to_new_block(block);
             all_new_blocks.push(new_block);
@@ -274,8 +234,6 @@ impl MegaBatchIndexer {
                     tx_index as i32, 
                     receipt
                 );
-                
-                // Collect addresses for analytics
                 all_new_addresses.insert(new_tx.from_address.clone());
                 if let Some(ref to) = new_tx.to_address {
                     all_new_addresses.insert(to.clone());
@@ -288,28 +246,16 @@ impl MegaBatchIndexer {
         
         info!("📊 Prepared {} blocks, {} transactions, {} addresses", 
               all_new_blocks.len(), all_new_transactions.len(), all_new_addresses.len());
-        
-        // BULK INSERT EVERYTHING AT ONCE
         let store_start = Instant::now();
-        
-        // Store blocks in bulk
         let blocks_inserted = self.block_repo.insert_blocks_bulk(all_new_blocks)?;
         info!("✅ Bulk inserted {} blocks", blocks_inserted);
-        
-        // Store transactions in chunks to avoid PostgreSQL parameter limit (65535)
-        // Each transaction has ~20 parameters, so we can do ~3000 transactions per chunk
         let mut total_txs_inserted = 0;
         for tx_chunk in all_new_transactions.chunks(3000) {
             let chunk_inserted = self.block_repo.insert_transactions_bulk(tx_chunk.to_vec())?;
             total_txs_inserted += chunk_inserted;
         }
-        
-        // Skip analytics processing in mega batch mode for maximum speed
-        
         let store_duration = store_start.elapsed();
         info!("💾 BULK STORAGE COMPLETE in {:.2}s", store_duration.as_secs_f64());
-        
-        // Skip WebSocket broadcasting in mega batch mode for maximum speed
         info!("📡 Skipping WebSocket broadcast for ultra-speed");
         
         Ok(blocks.len() as u64)
@@ -323,30 +269,18 @@ impl MegaBatchIndexer {
         }
         Err(anyhow::anyhow!("All nodes failed"))
     }
-    
-    /// Get the best performing node URL for WebSocket connection
     fn get_best_node_url(&self) -> Option<String> {
-        // For now, use the first node (rpc.mainnet.taiko.xyz has confirmed WebSocket support)
-        // TODO: Track node performance and select the fastest
         self.node_urls.first().map(|url| {
-            // Convert HTTP URL to WebSocket URL
             url.replace("https://", "wss://").replace("http://", "ws://")
         })
     }
-    
-    /// Run in live mode with WebSocket subscription when caught up
-    /// OPTIMIZED: Always store latest block height immediately, process transactions in background
     async fn run_live_mode(&self) -> Result<()> {
         info!("🔴 LIVE MODE: Initializing OPTIMIZED WebSocket subscription for real-time blocks");
         info!("🚀 OPTIMIZATION: Instant block height storage + parallel transaction processing");
-        
-        // Select the best performing node
         let ws_url = self.get_best_node_url()
             .ok_or_else(|| anyhow::anyhow!("No nodes available for WebSocket"))?;
         
         info!("📡 Connecting to WebSocket: {}", ws_url);
-        
-        // Connect to WebSocket
         let (ws_stream, _) = match connect_async(&ws_url).await {
             Ok(conn) => conn,
             Err(e) => {
@@ -356,8 +290,6 @@ impl MegaBatchIndexer {
         };
         
         let (mut write, mut read) = ws_stream.split();
-        
-        // Subscribe to newHeads
         let subscribe_msg = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -367,26 +299,19 @@ impl MegaBatchIndexer {
         
         write.send(Message::Text(subscribe_msg.to_string().into())).await?;
         info!("📨 Sent subscription request for newHeads");
-        
-        // Track processing
         let mut consecutive_errors = 0;
         let mut last_check = Instant::now();
         
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
-                    // Parse the subscription message
                     if let Ok(json_msg) = serde_json::from_str::<serde_json::Value>(&text) {
-                        // Check if it's a subscription notification
                         if let Some(params) = json_msg.get("params") {
                             if let Some(result) = params.get("result") {
                                 if let Some(block_number_hex) = result.get("number") {
                                     if let Some(hex_str) = block_number_hex.as_str() {
-                                        // Convert hex to decimal
                                         let block_num = u64::from_str_radix(&hex_str[2..], 16)?;
                                         info!("🔴 LIVE: New block #{} received via WebSocket", block_num);
-                                        
-                                        // OPTIMIZATION: Process block with instant height storage
                                         match self.process_live_block_optimized(block_num, &result).await {
                                             Ok(_) => {
                                                 info!("⚡ LIVE: Block #{} height stored instantly", block_num);
@@ -413,15 +338,11 @@ impl MegaBatchIndexer {
                 }
                 _ => {}
             }
-            
-            // Periodically check if we've fallen behind (much more lenient now)
             if last_check.elapsed() > Duration::from_secs(60) {
                 last_check = Instant::now();
                 let latest_db = self.block_repo.get_latest_block_number()?.unwrap_or(0);
                 let latest_chain = self.get_latest_block().await?;
                 let behind = latest_chain.saturating_sub(latest_db as u64);
-                
-                // Much higher threshold since we store height immediately
                 if behind > 50 {
                     info!("📉 Fallen behind by {} blocks (height only), switching back to batch mode", behind);
                     return Ok(());
@@ -429,8 +350,6 @@ impl MegaBatchIndexer {
                 
                 info!("📊 LIVE STATUS: DB height: {}, Chain: {}, Behind: {} blocks", latest_db, latest_chain, behind);
             }
-            
-            // If too many errors, fall back to batch mode
             if consecutive_errors > 10 {
                 error!("Too many consecutive errors in live mode, falling back");
                 return Err(anyhow::anyhow!("Too many errors in live mode"));
@@ -439,14 +358,8 @@ impl MegaBatchIndexer {
         
         Ok(())
     }
-    
-    /// OPTIMIZED: Process live block with instant height storage + parallel transaction processing
-    /// This ensures we NEVER fall behind on block heights, even if transaction processing is slow
     async fn process_live_block_optimized(&self, block_num: u64, block_header: &serde_json::Value) -> Result<()> {
         let start_time = Instant::now();
-        
-        // STEP 1: INSTANTLY store the block height/header (no transactions yet)
-        // This takes ~1ms and ensures we never fall behind on block heights
         let block_hash = block_header.get("hash")
             .and_then(|h| h.as_str())
             .unwrap_or("0x0");
@@ -454,8 +367,6 @@ impl MegaBatchIndexer {
             .and_then(|t| t.as_str())
             .and_then(|t| u64::from_str_radix(&t[2..], 16).ok())
             .unwrap_or(0);
-        
-        // Create minimal block record for instant storage
         let minimal_block = crate::models::block::NewBlock {
             number: block_num as i64,
             hash: block_hash.to_string(),
@@ -474,33 +385,29 @@ impl MegaBatchIndexer {
             miner: block_header.get("miner")
                 .and_then(|m| m.as_str())
                 .unwrap_or("0x0").to_string(),
-            transaction_count: 0, // Will be updated later
+            transaction_count: 0,
             size: block_header.get("size")
                 .and_then(|s| s.as_str())
                 .and_then(|s| u64::from_str_radix(&s[2..], 16).ok())
                 .map(|v| v as i64),
-            difficulty: bigdecimal::BigDecimal::from(0), // Taiko doesn't use difficulty
+            difficulty: bigdecimal::BigDecimal::from(0),
             total_difficulty: Some(bigdecimal::BigDecimal::from(0)),
             nonce: Some("0".to_string()),
             extra_data: block_header.get("extraData")
                 .and_then(|d| d.as_str())
                 .map(|d| d.to_string()),
-            logs_bloom: None, // Not available in WebSocket header
-            mix_hash: None,   // Not available in WebSocket header
+            logs_bloom: None,
+            mix_hash: None,
             base_fee_per_gas: block_header.get("baseFeePerGas")
                 .and_then(|f| f.as_str())
                 .and_then(|f| u64::from_str_radix(&f[2..], 16).ok())
                 .map(|v| v as i64),
         };
-        
-        // INSTANT STORAGE: Store block height immediately (takes ~1-2ms)
         let insert_start = Instant::now();
         match self.block_repo.insert_block(minimal_block) {
             Ok(_) => {
                 let insert_duration = insert_start.elapsed();
                 info!("⚡ INSTANT: Block #{} height stored in {:.2}ms", block_num, insert_duration.as_secs_f64() * 1000.0);
-                
-                // Immediately broadcast that we have a new block height with miner info
                 let miner = block_header.get("miner")
                     .and_then(|m| m.as_str())
                     .unwrap_or("0x0").to_string();
@@ -511,9 +418,6 @@ impl MegaBatchIndexer {
                 return Err(e.into());
             }
         }
-        
-        // STEP 2: SPAWN PARALLEL TASK for transaction processing
-        // This runs in background and won't block the next block
         let block_repo = self.block_repo.clone();
         let analytics_repo = self.analytics_repo.clone();
         let websocket_broadcaster = self.websocket_broadcaster.clone();
@@ -523,8 +427,6 @@ impl MegaBatchIndexer {
         tokio::spawn(async move {
             let tx_start = Instant::now();
             info!("🔄 PARALLEL: Starting transaction processing for block #{}", block_num);
-            
-            // Fetch full block with transactions
             let block_with_txs = match Self::fetch_full_block(&nodes, block_num).await {
                 Ok(block) => block,
                 Err(e) => {
@@ -532,33 +434,27 @@ impl MegaBatchIndexer {
                     return;
                 }
             };
-            
-            // Extract transaction hashes
             let tx_hashes: Vec<_> = block_with_txs.transactions.iter().map(|tx| tx.hash).collect();
             
             if !tx_hashes.is_empty() {
-                // Fetch receipts for all transactions
                 match Self::fetch_receipts_for_block(&nodes, &tx_hashes).await {
                     Ok(receipts) => {
-                        // Process and store all transactions
                         match Self::store_block_transactions(&block_repo, &analytics_repo, &bridge_detector, 
                                                            &websocket_broadcaster, &block_with_txs, &receipts).await {
                             Ok(tx_count) => {
                                 let tx_duration = tx_start.elapsed();
                                 info!("✅ PARALLEL: Block #{} - {} transactions processed in {:.2}s", 
                                       block_num, tx_count, tx_duration.as_secs_f64());
-                                
-                                // TODO: Update block with transaction count (implement later)
-                                info!("✅ Block #{} has {} transactions (transaction count update skipped for now)", block_num, tx_count);
-                                
-                                // Broadcast complete block with transactions
+                                if let Err(e) = block_repo.update_block_transaction_count(block_num as i64, tx_count as i32) {
+                                    error!("Failed to update transaction count for block #{}: {}", block_num, e);
+                                } else {
+                                    info!("✅ Updated block #{} with {} transactions", block_num, tx_count);
+                                }
                                 if let Ok(Some(complete_block)) = block_repo.get_block_by_number(block_num as i64) {
                                     websocket_broadcaster.broadcast_live_block_complete(complete_block).await;
                                 } else {
                                     warn!("Could not fetch complete block #{} for WebSocket broadcast", block_num);
                                 }
-                                
-                                // Broadcast updated stats
                                 Self::broadcast_updated_stats(&block_repo, &websocket_broadcaster).await;
                             }
                             Err(e) => {
@@ -577,8 +473,6 @@ impl MegaBatchIndexer {
                 } else {
                     warn!("Could not fetch complete block #{} for WebSocket broadcast", block_num);
                 }
-                
-                // Broadcast updated stats
                 Self::broadcast_updated_stats(&block_repo, &websocket_broadcaster).await;
             }
         });
@@ -589,8 +483,6 @@ impl MegaBatchIndexer {
         
         Ok(())
     }
-    
-    /// Helper: Fetch full block with transactions from any available node
     async fn fetch_full_block(nodes: &[Arc<TaikoRpcClient>], block_num: u64) -> Result<ethers::types::Block<ethers::types::Transaction>> {
         for node in nodes {
             if let Ok(Some(block)) = node.get_block_by_number(block_num).await {
@@ -599,13 +491,10 @@ impl MegaBatchIndexer {
         }
         Err(anyhow::anyhow!("Failed to fetch block #{} from any node", block_num))
     }
-    
-    /// Helper: Fetch receipts for a block's transactions
     async fn fetch_receipts_for_block(
         nodes: &[Arc<TaikoRpcClient>], 
         tx_hashes: &[ethers::types::H256]
     ) -> Result<Vec<Option<ethers::types::TransactionReceipt>>> {
-        // Use first node for simplicity - could be optimized to use batch client
         if let Some(node) = nodes.first() {
             let mut receipts = Vec::with_capacity(tx_hashes.len());
             
@@ -621,8 +510,6 @@ impl MegaBatchIndexer {
             Err(anyhow::anyhow!("No nodes available for receipt fetching"))
         }
     }
-    
-    /// Helper: Store block transactions and update analytics
     async fn store_block_transactions(
         block_repo: &Arc<BlockRepository>,
         analytics_repo: &Arc<AddressAnalyticsRepository>,
@@ -646,8 +533,6 @@ impl MegaBatchIndexer {
                 tx_index as i32, 
                 receipt
             );
-            
-            // Collect addresses for analytics
             new_addresses.insert(new_tx.from_address.clone());
             if let Some(ref to) = new_tx.to_address {
                 new_addresses.insert(to.clone());
@@ -655,15 +540,10 @@ impl MegaBatchIndexer {
             
             new_transactions.push(new_tx);
         }
-        
-        // Store transactions in bulk and broadcast them
         let tx_count = if !new_transactions.is_empty() {
             let inserted_count = block_repo.insert_transactions_bulk(new_transactions.clone())?;
-            
-            // ✅ BROADCAST EACH NEW TRANSACTION to WebSocket clients for LIVE updates
             info!("📡 Broadcasting {} new transactions to WebSocket clients", new_transactions.len());
             for new_tx in &new_transactions {
-                // Fetch the complete stored transaction for broadcasting
                 if let Ok(Some(stored_tx)) = block_repo.get_transaction_by_hash(&new_tx.hash) {
                     websocket_broadcaster.broadcast_new_transaction(stored_tx).await;
                 } else {
@@ -675,22 +555,16 @@ impl MegaBatchIndexer {
         } else {
             0
         };
-        
-        // TODO: Process analytics for new addresses (implement later)
         if !new_addresses.is_empty() {
             info!("📊 ANALYTICS: Skipping analytics processing for {} addresses (implement later)", new_addresses.len());
         }
         
         Ok(tx_count)
     }
-    
-    
-    /// Helper: Broadcast updated stats (total blocks, transactions, etc.)
     async fn broadcast_updated_stats(
         block_repo: &Arc<BlockRepository>,
         websocket_broadcaster: &Arc<WebSocketBroadcaster>
     ) {
-        // Get updated stats
         if let (Ok(total_blocks), Ok(latest_block), Ok(total_transactions)) = (
             block_repo.get_block_count(),
             block_repo.get_latest_block_number(),
@@ -700,20 +574,15 @@ impl MegaBatchIndexer {
                 total_blocks,
                 latest_block,
                 total_transactions,
-                0 // TODO: Add actual address count later
+                0
             ).await;
         }
     }
-    
-    /// Broadcast a newly processed block to WebSocket clients for real-time updates
     async fn broadcast_live_block(&self, block_number: u64) {
-        // Fetch the block from database to get complete details
         match self.block_repo.get_block_by_number(block_number as i64) {
             Ok(Some(block)) => {
                 info!("📡 Broadcasting live block #{} to WebSocket clients", block_number);
                 self.websocket_broadcaster.broadcast_new_block(block.clone()).await;
-                
-                // Also broadcast all transactions in this block
                 match self.block_repo.get_transactions_by_block(block_number as i64) {
                     Ok(transactions) => {
                         for tx in transactions {
@@ -725,12 +594,9 @@ impl MegaBatchIndexer {
                         warn!("Failed to fetch transactions for block #{}: {}", block_number, e);
                     }
                 }
-                
-                // Also broadcast updated stats
                 if let Ok(latest_block) = self.block_repo.get_latest_block_number() {
                     if let Ok(total_blocks) = self.block_repo.get_block_count() {
                         if let Ok(total_transactions) = self.block_repo.get_transaction_count() {
-                            // For now, set total_addresses to 0 since we don't have that method
                             self.websocket_broadcaster.broadcast_stats(
                                 total_blocks, 
                                 latest_block, 

@@ -38,7 +38,6 @@ impl AddressStatsGQL {
     }
 
     async fn gas_fees_in_eth(&self) -> f64 {
-        // TODO: Calculate from actual gas fees data
         0.0
     }
 

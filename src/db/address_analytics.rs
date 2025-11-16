@@ -18,7 +18,6 @@ impl AddressAnalyticsRepository {
         Self { pool }
     }
 
-    // Address Stats Methods
 
     pub fn get_address_stats(&self, address: &str) -> Result<Option<AddressStats>> {
         let mut conn = self.pool.get()?;
@@ -82,7 +81,6 @@ impl AddressAnalyticsRepository {
     pub fn compute_address_stats_from_transactions(&self, address: &str) -> Result<Option<NewAddressStats>> {
         let mut conn = self.pool.get()?;
         
-        // Get transaction counts
         let sent_count = transactions::table
             .filter(transactions::from_address.eq(address))
             .count()
@@ -99,7 +97,6 @@ impl AddressAnalyticsRepository {
             return Ok(None);
         }
         
-        // Get volume stats
         let sent_volume = transactions::table
             .filter(transactions::from_address.eq(address))
             .select(diesel::dsl::sum(transactions::value))
@@ -112,7 +109,6 @@ impl AddressAnalyticsRepository {
             .first::<Option<BigDecimal>>(&mut conn)?
             .unwrap_or_default();
         
-        // Get block range
         let first_block = transactions::table
             .filter(
                 transactions::from_address.eq(address)
@@ -147,7 +143,6 @@ impl AddressAnalyticsRepository {
         }))
     }
 
-    // Bridge Transaction Methods
 
     pub fn insert_bridge_transaction(&self, new_bridge_tx: NewBridgeTransaction) -> Result<BridgeTransaction> {
         let mut conn = self.pool.get()?;
@@ -162,7 +157,6 @@ impl AddressAnalyticsRepository {
         match bridge_tx {
             Some(tx) => Ok(tx),
             None => {
-                // Transaction already exists, fetch it
                 self.get_bridge_transaction_by_hash(&new_bridge_tx.transaction_hash)?
                     .ok_or_else(|| anyhow::anyhow!("Failed to insert or fetch bridge transaction"))
             }

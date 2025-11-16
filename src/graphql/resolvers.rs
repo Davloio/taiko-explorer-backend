@@ -60,25 +60,17 @@ impl TimeRange {
 
 #[derive(SimpleObject)]
 pub struct AddressChartPoint {
-    /// ISO timestamp (e.g., "2024-05-27T00:00:00Z")
     pub timestamp: String,
-    /// Total unique addresses up to this point in time
     pub total_addresses: i32,
-    /// New addresses that appeared on this day
     pub new_addresses: i32,
 }
 
 #[derive(SimpleObject)]
 pub struct AddressGrowthChart {
-    /// Time series data points for the chart
     pub data: Vec<AddressChartPoint>,
-    /// Current total number of unique addresses
     pub total_addresses: i32,
-    /// Growth rate as percentage over the selected time period
     pub growth_rate: f64,
-    /// Selected time range (e.g., "7D", "30D", "3M", "ALL")
     pub time_range: String,
-    /// Total number of data points in the chart
     pub data_points: i32,
 }
 
@@ -323,7 +315,6 @@ impl QueryResolver {
 
 #[Object]
 impl QueryResolver {
-    /// Get a block by its number
     async fn block(&self, number: i64) -> Result<Option<BlockGQL>> {
         match self.block_repo.get_block_by_number(number) {
             Ok(Some(block)) => Ok(Some(block.into())),
@@ -332,8 +323,7 @@ impl QueryResolver {
         }
     }
 
-    /// Get a block by its hash
-    async fn block_by_hash(&self, hash: String) -> Result<Option<BlockGQL>> {
+     async fn block_by_hash(&self, hash: String) -> Result<Option<BlockGQL>> {
         match self.block_repo.get_block_by_hash(&hash) {
             Ok(Some(block)) => Ok(Some(block.into())),
             Ok(None) => Ok(None),
@@ -341,8 +331,7 @@ impl QueryResolver {
         }
     }
 
-    /// Get the latest block
-    async fn latest_block(&self) -> Result<Option<BlockGQL>> {
+     async fn latest_block(&self) -> Result<Option<BlockGQL>> {
         match self.block_repo.get_latest_block_number() {
             Ok(Some(latest_number)) => {
                 match self.block_repo.get_block_by_number(latest_number) {
@@ -356,22 +345,17 @@ impl QueryResolver {
         }
     }
 
-    /// Get multiple blocks with pagination
-    async fn blocks(
+     async fn blocks(
         &self, 
         #[graphql(desc = "Starting block number")] from: Option<i64>,
         #[graphql(desc = "Number of blocks to fetch", default = 20)] limit: i32,
         #[graphql(desc = "Sort order: 'asc' or 'desc'", default = "desc")] order: String,
     ) -> Result<BlocksConnection> {
-        let limit = std::cmp::min(limit, 100) as usize; // Max 100 blocks per query
-        
-        // Get total count
+        let limit = std::cmp::min(limit, 100) as usize;
         let total_count = match self.block_repo.get_block_count() {
             Ok(count) => count,
             Err(e) => return Err(Error::new(format!("Database error: {}", e))),
         };
-
-        // Determine starting point
         let start_block = from.unwrap_or_else(|| {
             if order == "desc" {
                 self.block_repo.get_latest_block_number().unwrap_or(Some(0)).unwrap_or(0)
@@ -379,8 +363,6 @@ impl QueryResolver {
                 1
             }
         });
-
-        // Generate block numbers to fetch
         let block_numbers: Vec<i64> = if order == "desc" {
             (start_block.saturating_sub(limit as i64 - 1)..=start_block)
                 .rev()
@@ -389,8 +371,6 @@ impl QueryResolver {
             (start_block..=start_block + limit as i64 - 1)
                 .collect()
         };
-
-        // Fetch blocks
         let mut blocks = Vec::new();
         for block_num in block_numbers {
             if let Ok(Some(block)) = self.block_repo.get_block_by_number(block_num) {
@@ -418,8 +398,7 @@ impl QueryResolver {
         })
     }
 
-    /// Get explorer statistics
-    async fn stats(&self) -> Result<ExplorerStats> {
+     async fn stats(&self) -> Result<ExplorerStats> {
         let total_blocks = match self.block_repo.get_block_count() {
             Ok(count) => count,
             Err(e) => return Err(Error::new(format!("Database error: {}", e))),
@@ -430,20 +409,16 @@ impl QueryResolver {
             Ok(None) => 0,
             Err(_) => 0,
         };
-
-        // Get actual transaction count
         let total_transactions = match self.block_repo.get_transaction_count() {
             Ok(count) => count,
             Err(_) => 0,
         };
-
-        // Get unique address count
         let total_addresses = match self.block_repo.get_unique_address_count() {
             Ok(count) => count,
             Err(_) => 0,
         };
 
-        let avg_block_time = 12.0; // Taiko block time
+        let avg_block_time = 12.0;
 
         Ok(ExplorerStats {
             total_blocks,
@@ -454,8 +429,7 @@ impl QueryResolver {
         })
     }
 
-    /// Get a transaction by its hash
-    async fn transaction(&self, hash: String) -> Result<Option<TransactionGQL>> {
+     async fn transaction(&self, hash: String) -> Result<Option<TransactionGQL>> {
         match self.block_repo.get_transaction_by_hash(&hash) {
             Ok(Some(tx)) => Ok(Some(tx.to_graphql(Arc::clone(&self.block_repo)))),
             Ok(None) => Ok(None),
@@ -463,16 +437,14 @@ impl QueryResolver {
         }
     }
 
-    /// Get transactions for a specific block
-    async fn transactions_by_block(&self, block_number: i64) -> Result<Vec<TransactionGQL>> {
+     async fn transactions_by_block(&self, block_number: i64) -> Result<Vec<TransactionGQL>> {
         match self.block_repo.get_transactions_by_block(block_number) {
             Ok(txs) => Ok(txs.into_iter().map(|tx| tx.to_graphql(Arc::clone(&self.block_repo))).collect()),
             Err(e) => Err(Error::new(format!("Database error: {}", e))),
         }
     }
 
-    /// Get transactions with pagination and filtering
-    async fn transactions(
+     async fn transactions(
         &self,
         #[graphql(desc = "Number of transactions to fetch", default = 20)] limit: i32,
         #[graphql(desc = "Number of transactions to skip", default = 0)] offset: i32,
@@ -480,20 +452,14 @@ impl QueryResolver {
         #[graphql(desc = "Filter by transaction status")] status_filter: Option<TransactionStatus>,
         #[graphql(desc = "Filter by transaction direction")] direction_filter: Option<TransactionDirection>,
     ) -> Result<TransactionsConnection> {
-        let limit = std::cmp::min(limit, 100) as i64; // Max 100 transactions per query
+        let limit = std::cmp::min(limit, 100) as i64;
         let offset = offset as i64;
-        
-        // Convert filters to database values
         let status_filter_db = status_filter.and_then(|s| s.to_db_value());
         let direction_filter_db = direction_filter.map(|d| d.to_db_value());
-
-        // Get total count with filters
         let total_count = match self.block_repo.get_transaction_count_filtered(status_filter_db, direction_filter_db) {
             Ok(count) => count,
             Err(e) => return Err(Error::new(format!("Database error: {}", e))),
         };
-
-        // Fetch transactions with filters
         let transactions = match self.block_repo.get_transactions_paginated_filtered(limit, offset, order_desc, status_filter_db, direction_filter_db) {
             Ok(txs) => txs.into_iter().map(|tx| tx.to_graphql(Arc::clone(&self.block_repo))).collect(),
             Err(e) => return Err(Error::new(format!("Database error: {}", e))),
@@ -510,7 +476,6 @@ impl QueryResolver {
         })
     }
 
-    /// Get transactions for a specific address (sent from or received to)
     async fn transactions_by_address(
         &self,
         address: String,
@@ -522,17 +487,13 @@ impl QueryResolver {
         let limit = std::cmp::min(limit, 100) as i64;
         let offset = offset as i64;
 
-        // Convert filters to database values
         let status_filter_db = status_filter.and_then(|s| s.to_db_value());
         let direction_filter_db = direction_filter.map(|d| d.to_db_value());
 
-        // Get total count for address with filters
         let total_count = match self.block_repo.get_transactions_count_by_address_filtered(&address, status_filter_db, direction_filter_db) {
             Ok(count) => count,
             Err(e) => return Err(Error::new(format!("Database error: {}", e))),
         };
-
-        // Fetch transactions with filters
         let transactions = match self.block_repo.get_transactions_by_address_filtered(&address, limit, offset, status_filter_db, direction_filter_db) {
             Ok(txs) => txs.into_iter().map(|tx| tx.to_graphql(Arc::clone(&self.block_repo))).collect(),
             Err(e) => return Err(Error::new(format!("Database error: {}", e))),
@@ -549,8 +510,7 @@ impl QueryResolver {
         })
     }
 
-    /// Get failed transactions
-    async fn failed_transactions(
+     async fn failed_transactions(
         &self,
         #[graphql(desc = "Number of transactions to fetch", default = 20)] limit: i32,
     ) -> Result<Vec<TransactionGQL>> {
@@ -562,8 +522,7 @@ impl QueryResolver {
         }
     }
 
-    /// Get contract creation transactions
-    async fn contract_creations(
+     async fn contract_creations(
         &self,
         #[graphql(desc = "Number of transactions to fetch", default = 20)] limit: i32,
     ) -> Result<Vec<TransactionGQL>> {
@@ -575,10 +534,8 @@ impl QueryResolver {
         }
     }
 
-    // Address Analytics Queries
 
-    /// Get address statistics
-    async fn address_stats(&self, address: String) -> Result<Option<AddressStatsGQL>> {
+     async fn address_stats(&self, address: String) -> Result<Option<AddressStatsGQL>> {
         match self.analytics_repo.get_address_stats(&address) {
             Ok(Some(stats)) => Ok(Some(stats.into())),
             Ok(None) => Ok(None),
@@ -586,8 +543,7 @@ impl QueryResolver {
         }
     }
 
-    /// Get top addresses by transaction volume
-    async fn top_addresses_by_volume(
+     async fn top_addresses_by_volume(
         &self,
         #[graphql(desc = "Number of addresses to fetch", default = 10)] limit: i32,
     ) -> Result<Vec<AddressStatsGQL>> {
@@ -599,8 +555,7 @@ impl QueryResolver {
         }
     }
 
-    /// Get top addresses by transaction count
-    async fn top_addresses_by_activity(
+     async fn top_addresses_by_activity(
         &self,
         #[graphql(desc = "Number of addresses to fetch", default = 10)] limit: i32,
     ) -> Result<Vec<AddressStatsGQL>> {
@@ -613,10 +568,8 @@ impl QueryResolver {
     }
 
 
-    // Bridge Monitoring Queries
 
-    /// Get recent bridge transactions
-    async fn bridge_transactions(
+     async fn bridge_transactions(
         &self,
         #[graphql(desc = "Number of transactions to fetch", default = 20)] limit: i32,
         #[graphql(desc = "Number of transactions to skip", default = 0)] offset: i32,
@@ -630,8 +583,7 @@ impl QueryResolver {
         }
     }
 
-    /// Get bridge transactions for a specific address
-    async fn bridge_transactions_by_address(
+     async fn bridge_transactions_by_address(
         &self,
         address: String,
         #[graphql(desc = "Number of transactions to fetch", default = 20)] limit: i32,
@@ -644,8 +596,7 @@ impl QueryResolver {
         }
     }
 
-    /// Get bridge volume statistics over time
-    async fn bridge_volume_stats(
+     async fn bridge_volume_stats(
         &self,
         #[graphql(desc = "Number of days to fetch", default = 30)] days: i32,
     ) -> Result<Vec<BridgeStatsGQL>> {
@@ -657,15 +608,12 @@ impl QueryResolver {
         }
     }
 
-    /// Get comprehensive address analytics
     async fn address_analytics(&self) -> Result<AddressAnalytics> {
-        // Get top addresses by volume (limit 10)
         let top_volume = match self.analytics_repo.get_top_addresses_by_volume(10) {
             Ok(addresses) => addresses.into_iter().map(|addr| addr.into()).collect(),
             Err(_) => vec![],
         };
 
-        // Get top addresses by activity (limit 10)
         let top_activity = match self.analytics_repo.get_top_addresses_by_transactions(10) {
             Ok(addresses) => addresses.into_iter().map(|addr| addr.into()).collect(),
             Err(_) => vec![],
@@ -677,23 +625,19 @@ impl QueryResolver {
         })
     }
 
-    /// Get comprehensive bridge analytics
-    async fn bridge_analytics(&self) -> Result<BridgeAnalytics> {
-        // Get recent bridge transactions
+     async fn bridge_analytics(&self) -> Result<BridgeAnalytics> {
         let recent_transactions = match self.analytics_repo.get_bridge_transactions(20, 0) {
             Ok(txs) => txs.into_iter().map(|tx| tx.into()).collect(),
             Err(_) => vec![],
         };
 
-        // Get daily bridge stats for last 30 days
         let daily_stats = match self.analytics_repo.get_bridge_volume_by_date(30) {
             Ok(stats) => stats.into_iter().map(|stat| stat.into()).collect(),
             Err(_) => vec![],
         };
 
-        // Calculate aggregated metrics (placeholder values)
-        let total_tvl_eth = 0.0; // Would calculate from latest stats
-        let bridge_volume_24h_eth = 0.0; // Would calculate from last 24h
+        let total_tvl_eth = 0.0;
+        let bridge_volume_24h_eth = 0.0;
 
         Ok(BridgeAnalytics {
             recent_bridge_transactions: recent_transactions,
@@ -703,16 +647,14 @@ impl QueryResolver {
         })
     }
 
-    /// Get comprehensive address profile
-    async fn address_profile(&self, address: String) -> Result<AddressProfileGQL> {
+     async fn address_profile(&self, address: String) -> Result<AddressProfileGQL> {
         match self.block_repo.get_address_profile(&address) {
             Ok(profile) => Ok(profile.into()),
             Err(e) => Err(Error::new(format!("Database error: {}", e))),
         }
     }
     
-    /// Get transaction counts by status
-    async fn transaction_counts_by_status(&self) -> Result<TransactionStatusCounts> {
+     async fn transaction_counts_by_status(&self) -> Result<TransactionStatusCounts> {
         let success_count = match self.block_repo.get_transaction_count_filtered(Some(1), None) {
             Ok(count) => count,
             Err(e) => return Err(Error::new(format!("Database error: {}", e))),
@@ -736,8 +678,7 @@ impl QueryResolver {
         })
     }
     
-    /// Get transaction counts by direction
-    async fn transaction_counts_by_direction(&self) -> Result<TransactionDirectionCounts> {
+     async fn transaction_counts_by_direction(&self) -> Result<TransactionDirectionCounts> {
         let in_count = match self.block_repo.get_transaction_count_filtered(None, Some("in")) {
             Ok(count) => count,
             Err(e) => return Err(Error::new(format!("Database error: {}", e))),
@@ -761,18 +702,15 @@ impl QueryResolver {
         })
     }
 
-    /// Get address growth chart data over time
-    async fn address_growth_chart(
+     async fn address_growth_chart(
         &self,
         #[graphql(desc = "Time range for the chart")] time_range: TimeRange,
     ) -> Result<AddressGrowthChart> {
-        // Get chart data from database (always ALL TIME, ignoring time_range parameter)
         let chart_data = match self.block_repo.get_address_growth_chart(None) {
             Ok(data) => data,
             Err(e) => return Err(Error::new(format!("Database error: {}", e))),
         };
 
-        // Convert to GraphQL format
         let data_points: Vec<AddressChartPoint> = chart_data
             .iter()
             .map(|(timestamp, total, new)| AddressChartPoint {
@@ -782,8 +720,6 @@ impl QueryResolver {
             })
             .collect();
 
-        // Calculate metrics
-        // Get the actual current total unique addresses from database
         let total_addresses = match self.block_repo.get_unique_address_count() {
             Ok(count) => count as i32,
             Err(_) => data_points.last().map(|p| p.total_addresses).unwrap_or(0),

@@ -42,13 +42,11 @@ async fn main() -> Result<()> {
     
     run_migrations(&pool)?;
     
-    // Initialize repositories and WebSocket broadcaster
     info!("🔧 Initializing database repositories and WebSocket broadcaster");
     let block_repo = BlockRepository::new(pool.clone());
     let analytics_repo = AddressAnalyticsRepository::new(pool);
     let websocket_broadcaster = Arc::new(WebSocketBroadcaster::new());
     
-    // Initialize MEGA BATCH indexer - aggressive batch processing
     info!("🚀 Initializing MEGA BATCH INDEXER");
     info!("🎯 AGGRESSIVE settings: 1000-block batches, 1000-receipt mega batches, ultra-massive bulk storage");
     let indexer = MegaBatchIndexer::new(

@@ -9,7 +9,6 @@ use crate::bridge::BridgeDetector;
 use crate::models::address_analytics::NewAddressStats;
 use crate::models::bridge::NewBridgeTransaction;
 
-/// Processes analytics for a block's transactions
 pub async fn process_block_analytics(
     analytics_repo: &AddressAnalyticsRepository,
     bridge_detector: &BridgeDetector,
@@ -20,11 +19,9 @@ pub async fn process_block_analytics(
 ) -> Result<()> {
     let timestamp = DateTime::<Utc>::from_timestamp(block_timestamp, 0).unwrap_or_else(Utc::now);
     
-    // Process each transaction for bridge detection
     for (index, tx) in transactions.iter().enumerate() {
         let receipt = receipts.get(index).and_then(|r| r.as_ref());
         
-        // Detect bridge transactions
         if let Some(bridge_tx) = detect_bridge_transaction(tx, receipt, block_number, timestamp)? {
             match analytics_repo.insert_bridge_transaction(bridge_tx) {
                 Ok(_) => info!("🌉 Bridge transaction detected: {}", format!("0x{:x}", tx.hash)),
@@ -32,7 +29,6 @@ pub async fn process_block_analytics(
             }
         }
         
-        // Update address statistics for sender
         update_address_stats(
             analytics_repo,
             &format!("0x{:x}", tx.from),
@@ -44,7 +40,6 @@ pub async fn process_block_analytics(
             tx.to.as_ref().map(|addr| format!("0x{:x}", addr)),
         );
         
-        // Update address statistics for receiver
         if let Some(to_addr) = &tx.to {
             update_address_stats(
                 analytics_repo,
@@ -62,26 +57,22 @@ pub async fn process_block_analytics(
     Ok(())
 }
 
-/// Detect if a transaction is a bridge transaction
 fn detect_bridge_transaction(
     tx: &Transaction,
     receipt: Option<&TransactionReceipt>,
     block_number: i64,
     timestamp: DateTime<Utc>,
 ) -> Result<Option<NewBridgeTransaction>> {
-    // Known Taiko bridge contracts
     const BRIDGE_CONTRACTS: &[&str] = &[
         "0x1670000000000000000000000000000000000001",  // Taiko Bridge
         "0x1670000000000000000000000000000000010001",  // Taiko Signal Service
     ];
     
-    // Check if transaction is to a bridge contract
     if let Some(to_addr) = &tx.to {
         let to_str = format!("0x{:x}", to_addr).to_lowercase();
         
         for bridge_addr in BRIDGE_CONTRACTS {
             if to_str == bridge_addr.to_lowercase() {
-                // Determine bridge type based on value and input
                 let bridge_type = if tx.value > ethers::types::U256::zero() {
                     "deposit"
                 } else if tx.input.len() > 4 {
@@ -90,7 +81,6 @@ fn detect_bridge_transaction(
                     "unknown"
                 };
                 
-                // Determine status from receipt
                 let status = receipt.map(|r| {
                     if r.status == Some(ethers::types::U64::from(1)) {
                         "success"
@@ -124,7 +114,6 @@ fn detect_bridge_transaction(
     Ok(None)
 }
 
-/// Update address statistics
 fn update_address_stats(
     analytics_repo: &AddressAnalyticsRepository,
     address: &str,
@@ -135,13 +124,11 @@ fn update_address_stats(
     gas_used: Option<u64>,
     counterparty: Option<String>,
 ) {
-    // Get or create address stats
     let existing_stats = analytics_repo.get_address_stats(address).ok().flatten();
     
     let value_bigdec = value.parse::<BigDecimal>().unwrap_or_default();
     
     let new_stats = if let Some(mut stats) = existing_stats {
-        // Update existing stats
         stats.last_seen_block = block_number;
         stats.total_transactions = stats.total_transactions.map(|t| t + 1).or(Some(1));
         
@@ -167,7 +154,6 @@ fn update_address_stats(
             );
         }
         
-        // Convert back to NewAddressStats for update
         NewAddressStats {
             address: stats.address,
             first_seen_block: stats.first_seen_block,
@@ -183,7 +169,6 @@ fn update_address_stats(
             contract_deployments: stats.contract_deployments,
         }
     } else {
-        // Create new stats
         NewAddressStats {
             address: address.to_string(),
             first_seen_block: block_number,
@@ -200,7 +185,6 @@ fn update_address_stats(
         }
     };
     
-    // Update in database
     match analytics_repo.upsert_address_stats(new_stats) {
         Ok(_) => {},
         Err(e) => warn!("Failed to update address stats for {}: {}", address, e),

@@ -55,7 +55,6 @@ impl WebSocketBroadcaster {
         }
     }
 
-    /// Broadcast a new block to all connected clients
     pub async fn broadcast_new_block(&self, block: Block) {
         let msg = WebSocketMessage::NewBlock(block);
         if let Err(e) = self.sender.send(msg) {
@@ -65,7 +64,6 @@ impl WebSocketBroadcaster {
         }
     }
 
-    /// Broadcast a new transaction to all connected clients
     pub async fn broadcast_new_transaction(&self, transaction: Transaction) {
         let msg = WebSocketMessage::NewTransaction(transaction);
         if let Err(e) = self.sender.send(msg) {
@@ -73,7 +71,6 @@ impl WebSocketBroadcaster {
         }
     }
 
-    /// Broadcast current stats (total blocks, latest block, total transactions, total addresses)
     pub async fn broadcast_stats(&self, total_blocks: i64, latest_block: Option<i64>, total_transactions: i64, total_addresses: i64) {
         let msg = WebSocketMessage::Stats { 
             total_blocks, 
@@ -88,7 +85,6 @@ impl WebSocketBroadcaster {
         }
     }
 
-    /// Broadcast when a new address appears on the network
     pub async fn broadcast_new_address(&self, address: String) {
         let msg = WebSocketMessage::NewAddress { address: address.clone() };
         if let Err(e) = self.sender.send(msg) {
@@ -98,7 +94,6 @@ impl WebSocketBroadcaster {
         }
     }
 
-    /// Broadcast address activity (new transaction involving an address)
     pub async fn broadcast_address_activity(&self, address: String, transaction_hash: String, transaction_type: String) {
         let msg = WebSocketMessage::AddressActivity { 
             address: address.clone(), 
@@ -113,7 +108,6 @@ impl WebSocketBroadcaster {
         }
     }
 
-    /// Broadcast updated address statistics
     pub async fn broadcast_address_stats_update(&self, address_stats: AddressStats) {
         let msg = WebSocketMessage::AddressStatsUpdate(address_stats.clone());
         if let Err(e) = self.sender.send(msg) {
@@ -124,9 +118,7 @@ impl WebSocketBroadcaster {
         }
     }
 
-    /// Broadcast when a block is completely processed (with all transactions)
     pub async fn broadcast_live_block_complete(&self, block: Block) {
-        // Send both block completion AND new_block message for frontend
         let completion_msg = WebSocketMessage::BlockComplete { block_number: block.number as u64 };
         let new_block_msg = WebSocketMessage::NewBlock(block.clone());
         
@@ -142,12 +134,11 @@ impl WebSocketBroadcaster {
         }
     }
 
-    /// Broadcast new block height immediately (before transactions are processed)
     pub async fn broadcast_new_block_height(&self, block_number: u64, miner: String, timestamp: i64) {
         let height_msg = WebSocketMessage::NewBlockHeight { 
             block_number,
             miner,
-            transaction_count: 0, // Will be updated later when transactions are processed
+            transaction_count: 0,
             timestamp,
         };
         
@@ -159,12 +150,10 @@ impl WebSocketBroadcaster {
         }
     }
 
-    /// Get number of active connections
     async fn connection_count(&self) -> usize {
         self.connections.read().await.len()
     }
 
-    /// Add a new connection
     async fn add_connection(&self) -> (String, broadcast::Receiver<WebSocketMessage>) {
         let connection_id = Uuid::new_v4().to_string();
         let receiver = self.sender.subscribe();
@@ -175,7 +164,6 @@ impl WebSocketBroadcaster {
         (connection_id, receiver)
     }
 
-    /// Remove a connection
     async fn remove_connection(&self, connection_id: &str) {
         self.connections.write().await.remove(connection_id);
         info!("🔌 WebSocket disconnected: {} (total: {})", connection_id, self.connection_count().await);
@@ -188,7 +176,6 @@ impl Default for WebSocketBroadcaster {
     }
 }
 
-/// WebSocket handler
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
     Extension(broadcaster): Extension<Arc<WebSocketBroadcaster>>,
@@ -200,7 +187,6 @@ async fn handle_websocket(socket: WebSocket, broadcaster: Arc<WebSocketBroadcast
     let (connection_id, mut receiver) = broadcaster.add_connection().await;
     let (mut sender, mut receiver_ws) = socket.split();
 
-    // Send welcome message
     let welcome_msg = json!({
         "type": "connected",
         "message": "Connected to Taiko Explorer WebSocket",
@@ -213,7 +199,6 @@ async fn handle_websocket(socket: WebSocket, broadcaster: Arc<WebSocketBroadcast
         return;
     }
 
-    // Spawn task to handle incoming messages from client
     let broadcaster_clone = broadcaster.clone();
     let connection_id_clone = connection_id.clone();
     let incoming_task = tokio::spawn(async move {
@@ -221,7 +206,6 @@ async fn handle_websocket(socket: WebSocket, broadcaster: Arc<WebSocketBroadcast
             match msg {
                 Ok(Message::Text(text)) => {
                     info!("Received message from {}: {}", connection_id_clone, text);
-                    // Handle ping/pong or subscription requests here if needed
                 }
                 Ok(Message::Close(_)) => {
                     info!("Connection {} requested close", connection_id_clone);
@@ -237,7 +221,6 @@ async fn handle_websocket(socket: WebSocket, broadcaster: Arc<WebSocketBroadcast
         broadcaster_clone.remove_connection(&connection_id_clone).await;
     });
 
-    // Handle outgoing messages (broadcasts)
     while let Ok(broadcast_msg) = receiver.recv().await {
         let json_msg = match broadcast_msg {
             WebSocketMessage::NewBlock(block) => {
@@ -343,7 +326,6 @@ async fn handle_websocket(socket: WebSocket, broadcaster: Arc<WebSocketBroadcast
         }
     }
 
-    // Clean up
     incoming_task.abort();
     broadcaster.remove_connection(&connection_id).await;
     info!("WebSocket handler completed for {}", connection_id);

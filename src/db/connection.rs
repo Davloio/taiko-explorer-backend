@@ -13,7 +13,7 @@ pub fn establish_connection() -> DbPool {
     let manager = ConnectionManager::<PgConnection>::new(database_url);
     
     r2d2::Pool::builder()
-        .max_size(50) // Increased for parallel processing
+        .max_size(50)
         .min_idle(Some(10))
         .connection_timeout(Duration::from_secs(30))
         .build(manager)

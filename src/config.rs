@@ -14,7 +14,6 @@ impl Config {
     pub fn from_env() -> Result<Self> {
         dotenv::dotenv().ok();
 
-        // Parse comma-separated RPC nodes for mega batch indexer
         let rpc_nodes_string = env::var("TAIKO_RPC_NODES")
             .unwrap_or_else(|_| "https://taiko-rpc.publicnode.com,https://taiko-json-rpc.stakely.io,https://rpc.mainnet.taiko.xyz".to_string());
         

@@ -127,8 +127,19 @@ impl BlockRepository {
         Ok(count)
     }
 
+    pub fn update_block_transaction_count(&self, block_number: i64, tx_count: i32) -> Result<()> {
+        use diesel::prelude::*;
+        let mut conn = self.pool.get()?;
+        
+        diesel::update(blocks::table)
+            .filter(blocks::number.eq(block_number))
+            .set(blocks::transaction_count.eq(tx_count))
+            .execute(&mut conn)?;
+        
+        Ok(())
+    }
 
-    // Transaction operations
+
     pub fn insert_transaction(&self, new_transaction: NewTransaction) -> Result<Transaction> {
         let mut conn = self.pool.get()?;
         
@@ -142,7 +153,6 @@ impl BlockRepository {
         match transaction {
             Some(tx) => Ok(tx),
             None => {
-                // Transaction already exists, fetch it
                 self.get_transaction_by_hash(&new_transaction.hash)?.ok_or_else(|| {
                     anyhow::anyhow!("Failed to insert or fetch transaction {}", new_transaction.hash)
                 })
@@ -208,18 +218,12 @@ impl BlockRepository {
         let mut conn = self.pool.get()?;
         
         let mut query = transactions::table.into_boxed();
-        
-        // Apply status filter
         if let Some(status) = status_filter {
             query = query.filter(transactions::status.eq(status));
         }
-        
-        // Apply direction filter
         if let Some(direction) = direction_filter {
             query = query.filter(transactions::direction.eq(direction));
         }
-        
-        // Apply ordering
         if order_desc {
             query = query.order(transactions::block_number.desc());
         } else {
@@ -238,13 +242,9 @@ impl BlockRepository {
         let mut conn = self.pool.get()?;
         
         let mut query = transactions::table.into_boxed();
-        
-        // Apply status filter
         if let Some(status) = status_filter {
             query = query.filter(transactions::status.eq(status));
         }
-        
-        // Apply direction filter
         if let Some(direction) = direction_filter {
             query = query.filter(transactions::direction.eq(direction));
         }
@@ -305,13 +305,9 @@ impl BlockRepository {
                     .or(transactions::to_address.eq(address))
             )
             .into_boxed();
-        
-        // Apply status filter
         if let Some(status) = status_filter {
             query = query.filter(transactions::status.eq(status));
         }
-        
-        // Apply direction filter
         if let Some(direction) = direction_filter {
             query = query.filter(transactions::direction.eq(direction));
         }
@@ -334,13 +330,9 @@ impl BlockRepository {
                     .or(transactions::to_address.eq(address))
             )
             .into_boxed();
-        
-        // Apply status filter
         if let Some(status) = status_filter {
             query = query.filter(transactions::status.eq(status));
         }
-        
-        // Apply direction filter
         if let Some(direction) = direction_filter {
             query = query.filter(transactions::direction.eq(direction));
         }
@@ -352,11 +344,7 @@ impl BlockRepository {
 
     pub fn get_address_profile(&self, address: &str) -> Result<AddressProfile> {
         let mut conn = self.pool.get()?;
-        
-        // Get total transaction count
         let total_transactions = self.get_transactions_count_by_address(address)?;
-        
-        // Get first and last activity
         let first_activity = transactions::table
             .filter(
                 transactions::from_address.eq(address)
@@ -376,8 +364,6 @@ impl BlockRepository {
             .select((transactions::block_number, transactions::hash))
             .first::<(i64, String)>(&mut conn)
             .optional()?;
-        
-        // Calculate total volume sent and received
         let sent_volume = transactions::table
             .filter(transactions::from_address.eq(address))
             .select(diesel::dsl::sum(transactions::value))
@@ -389,8 +375,6 @@ impl BlockRepository {
             .select(diesel::dsl::sum(transactions::value))
             .first::<Option<BigDecimal>>(&mut conn)?
             .unwrap_or_else(|| BigDecimal::from(0));
-        
-        // Calculate total gas fees
         let total_gas_fees = transactions::table
             .filter(transactions::from_address.eq(address))
             .filter(transactions::gas_price.is_not_null())
@@ -446,23 +430,17 @@ impl BlockRepository {
 
     pub fn get_unique_address_count(&self) -> Result<i64> {
         let mut conn = self.pool.get()?;
-        
-        // Count unique from_address
         let from_count = transactions::table
             .select(transactions::from_address)
             .distinct()
             .count()
             .get_result::<i64>(&mut conn)?;
-        
-        // Count unique to_address (excluding NULL)
         let to_count = transactions::table
             .filter(transactions::to_address.is_not_null())
             .select(transactions::to_address)
             .distinct()
             .count()
             .get_result::<i64>(&mut conn)?;
-        
-        // Use raw SQL to get accurate count of all unique addresses
         use diesel::sql_types::BigInt;
         #[derive(QueryableByName)]
         struct AddressCount {
@@ -484,8 +462,6 @@ impl BlockRepository {
 
     pub fn get_address_growth_chart(&self, _days: Option<i32>) -> Result<Vec<(String, i32, i32)>> {
         let mut conn = self.pool.get()?;
-        
-        // Always use ALL TIME data - simplified query for 10 data points
         let query = "
             WITH time_bounds AS (
                 SELECT 
@@ -494,14 +470,12 @@ impl BlockRepository {
                 FROM blocks b
             ),
             date_series AS (
-                -- Generate exactly 10 evenly spaced data points
                 SELECT 
                     (tb.start_date + (n * (tb.end_date - tb.start_date) / GREATEST(9, 1)))::date as period_date
                 FROM time_bounds tb
                 CROSS JOIN generate_series(0, 9) as n
             ),
             daily_unique_addresses AS (
-                -- Get all unique addresses per day (no double counting)
                 SELECT 
                     DATE(to_timestamp(b.timestamp)) as date,
                     t.from_address as address
@@ -519,7 +493,6 @@ impl BlockRepository {
                 WHERE t.to_address IS NOT NULL
             ),
             first_appearances AS (
-                -- Get the first time each address appeared
                 SELECT 
                     address,
                     MIN(date) as first_seen_date
@@ -527,7 +500,6 @@ impl BlockRepository {
                 GROUP BY address
             ),
             daily_totals AS (
-                -- Count truly new addresses per day (first appearance only)
                 SELECT 
                     first_seen_date as date,
                     COUNT(*) as daily_new_count
@@ -536,14 +508,12 @@ impl BlockRepository {
                 ORDER BY first_seen_date
             ),
             cumulative_totals AS (
-                -- Calculate running totals up to each date
                 SELECT 
                     date,
                     SUM(daily_new_count) OVER (ORDER BY date) as cumulative_count
                 FROM daily_totals
             ),
             period_data AS (
-                -- Get the cumulative total for each period date
                 SELECT 
                     ds.period_date,
                     COALESCE(MAX(ct.cumulative_count), 0)::bigint as total_addresses_at_date
@@ -558,19 +528,15 @@ impl BlockRepository {
                 total_addresses_at_date as total_addresses
             FROM period_data
             ORDER BY period_date";
-
-        // Execute raw SQL query
         let results = diesel::sql_query(query)
             .load::<DailyAddressCount>(&mut conn)?;
-
-        // Convert to the required format - totals already calculated in SQL
         let mut chart_data = Vec::new();
 
         for result in results {
             chart_data.push((
-                format!("{}T00:00:00Z", result.date), // Convert to ISO timestamp
-                result.total_addresses as i32, // Total addresses (cumulative)
-                result.new_addresses as i32, // New addresses in this period
+                format!("{}T00:00:00Z", result.date),
+                result.total_addresses as i32,
+                result.new_addresses as i32
             ));
         }
 
