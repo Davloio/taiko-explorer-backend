@@ -30,6 +30,13 @@ pub enum WebSocketMessage {
     NewAddress { address: String },
     AddressActivity { address: String, transaction_hash: String, transaction_type: String },
     AddressStatsUpdate(AddressStats),
+    NewBlockHeight { 
+        block_number: u64, 
+        miner: String,
+        transaction_count: i32,
+        timestamp: i64,
+    },
+    BlockComplete { block_number: u64 },
 }
 
 #[derive(Clone)]
@@ -114,6 +121,41 @@ impl WebSocketBroadcaster {
         } else {
             info!("🌐 Broadcasted stats update for address {} to {} connections", 
                   address_stats.address, self.connection_count().await);
+        }
+    }
+
+    /// Broadcast when a block is completely processed (with all transactions)
+    pub async fn broadcast_live_block_complete(&self, block: Block) {
+        // Send both block completion AND new_block message for frontend
+        let completion_msg = WebSocketMessage::BlockComplete { block_number: block.number as u64 };
+        let new_block_msg = WebSocketMessage::NewBlock(block.clone());
+        
+        if let Err(e) = self.sender.send(completion_msg) {
+            warn!("Failed to broadcast block completion: {}", e);
+        }
+        
+        if let Err(e) = self.sender.send(new_block_msg) {
+            warn!("Failed to broadcast new block: {}", e);
+        } else {
+            info!("📡 COMPLETE: Broadcasting complete block #{} to {} connections", 
+                  block.number, self.connection_count().await);
+        }
+    }
+
+    /// Broadcast new block height immediately (before transactions are processed)
+    pub async fn broadcast_new_block_height(&self, block_number: u64, miner: String, timestamp: i64) {
+        let height_msg = WebSocketMessage::NewBlockHeight { 
+            block_number,
+            miner,
+            transaction_count: 0, // Will be updated later when transactions are processed
+            timestamp,
+        };
+        
+        if let Err(e) = self.sender.send(height_msg) {
+            warn!("Failed to broadcast new block height: {}", e);
+        } else {
+            info!("📡 INSTANT: Broadcasting block height #{} to {} connections", 
+                  block_number, self.connection_count().await);
         }
     }
 
@@ -268,6 +310,28 @@ async fn handle_websocket(socket: WebSocket, broadcaster: Arc<WebSocketBroadcast
                         "contract_deployments": address_stats.contract_deployments,
                         "first_seen_block": address_stats.first_seen_block,
                         "last_seen_block": address_stats.last_seen_block
+                    }
+                })
+            }
+            WebSocketMessage::NewBlockHeight { block_number, miner, transaction_count, timestamp } => {
+                json!({
+                    "type": "new_block_height",
+                    "data": {
+                        "block_number": block_number,
+                        "timestamp": timestamp,
+                        "status": "height_stored",
+                        "miner": miner,
+                        "transaction_count": transaction_count
+                    }
+                })
+            }
+            WebSocketMessage::BlockComplete { block_number } => {
+                json!({
+                    "type": "block_complete",
+                    "data": {
+                        "block_number": block_number,
+                        "timestamp": chrono::Utc::now().timestamp(),
+                        "status": "transactions_processed"
                     }
                 })
             }

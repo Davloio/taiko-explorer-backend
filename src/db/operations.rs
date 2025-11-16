@@ -127,6 +127,7 @@ impl BlockRepository {
         Ok(count)
     }
 
+
     // Transaction operations
     pub fn insert_transaction(&self, new_transaction: NewTransaction) -> Result<Transaction> {
         let mut conn = self.pool.get()?;
