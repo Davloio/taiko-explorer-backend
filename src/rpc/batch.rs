@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use ethers::types::{H256, TransactionReceipt};
+use ethers::types::{H256, TransactionReceipt, Block, Transaction};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tracing::{info, warn, error};
@@ -223,5 +223,70 @@ impl BatchCapabilities {
                 info!("⚠️  LIMITED: Max ~{:.1} blocks/second with 40 tx/block", blocks_per_second_40tx);
             }
         }
+    }
+}
+
+impl BatchRpcClient {
+    pub async fn get_blocks_batch(&self, block_numbers: Vec<u64>) -> Result<Vec<Option<Block<Transaction>>>> {
+        if block_numbers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut batch_request = Vec::new();
+        
+        for (id, block_num) in block_numbers.iter().enumerate() {
+            batch_request.push(json!({
+                "jsonrpc": "2.0",
+                "method": "eth_getBlockByNumber",
+                "params": [format!("0x{:x}", block_num), true],
+                "id": id
+            }));
+        }
+
+        let start_time = std::time::Instant::now();
+
+        let response = self.client
+            .post(&self.base_url)
+            .header("Content-Type", "application/json")
+            .json(&batch_request)
+            .send()
+            .await?;
+
+        let response_time = start_time.elapsed();
+        info!("⚡ Block batch request completed in {:?} ({} blocks = {:.1} blocks/ms)", 
+              response_time, block_numbers.len(), block_numbers.len() as f64 / response_time.as_millis() as f64);
+
+        if !response.status().is_success() {
+            return Err(anyhow!("HTTP error: {}", response.status()));
+        }
+
+        let batch_response: Value = response.json().await?;
+        let mut blocks = vec![None; block_numbers.len()];
+
+        match batch_response {
+            Value::Array(responses) => {
+                for response in responses {
+                    if let Some(id) = response["id"].as_u64() {
+                        if let Some(index) = id.checked_sub(0).and_then(|i| (i as usize).checked_sub(0)) {
+                            if index < blocks.len() {
+                                if let Some(result) = response.get("result") {
+                                    if !result.is_null() {
+                                        match serde_json::from_value::<Block<Transaction>>(result.clone()) {
+                                            Ok(block) => blocks[index] = Some(block),
+                                            Err(e) => warn!("Failed to parse block {}: {}", block_numbers[index], e),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(anyhow!("Invalid batch response format"));
+            }
+        }
+
+        Ok(blocks)
     }
 }

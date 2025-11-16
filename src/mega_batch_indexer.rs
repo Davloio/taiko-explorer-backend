@@ -81,7 +81,7 @@ impl MegaBatchIndexer {
                 }
                 continue;
             }
-            let batch_size = std::cmp::min(100, blocks_behind);
+            let batch_size = std::cmp::min(1000, blocks_behind);
             let start_block = latest_db_block as u64 + 1;
             let end_block = start_block + batch_size - 1;
             
@@ -94,6 +94,8 @@ impl MegaBatchIndexer {
                     let blocks_per_second = processed as f64 / duration.as_secs_f64();
                     info!("✅ MEGA BATCH COMPLETE: {} blocks in {:.2}s = {:.1} blocks/second", 
                           processed, duration.as_secs_f64(), blocks_per_second);
+                    // Delay between mega batches to prevent rate limiting
+                    tokio::time::sleep(Duration::from_millis(1000)).await;
                 }
                 Err(e) => {
                     error!("❌ Mega batch failed: {}", e);
@@ -133,58 +135,43 @@ impl MegaBatchIndexer {
     }
     async fn fetch_blocks_mega_parallel(&self, start_block: u64, end_block: u64) -> Result<Vec<ethers::types::Block<ethers::types::Transaction>>> {
         let batch_size = end_block - start_block + 1;
-        let blocks_per_node = (batch_size + self.nodes.len() as u64 - 1) / self.nodes.len() as u64;
+        info!("📦 Using BATCH requests: {} blocks in chunks of 1000", batch_size);
         
-        let mut fetch_tasks = Vec::new();
+        let batch_client = &self.batch_clients[0];
+        let mut all_blocks = Vec::new();
         
-        for (node_idx, node) in self.nodes.iter().enumerate() {
-            let node_start = start_block + (node_idx as u64 * blocks_per_node);
-            let node_end = std::cmp::min(node_start + blocks_per_node - 1, end_block);
+        // Process in chunks of 1000 blocks (1 HTTP request per chunk)
+        for chunk_start in (start_block..=end_block).step_by(1000) {
+            let chunk_end = std::cmp::min(chunk_start + 999, end_block);
+            let block_numbers: Vec<u64> = (chunk_start..=chunk_end).collect();
             
-            if node_start <= end_block {
-                let node_clone = node.clone();
-                let task = tokio::spawn(async move {
-                    let mut node_blocks = Vec::new();
-                    for chunk_start in (node_start..=node_end).step_by(50) {
-                        let chunk_end = std::cmp::min(chunk_start + 49, node_end);
-                        
-                        let mut chunk_tasks = Vec::new();
-                        for block_num in chunk_start..=chunk_end {
-                            let node = node_clone.clone();
-                            chunk_tasks.push(tokio::spawn(async move {
-                                node.get_block_by_number(block_num).await
-                            }));
-                        }
-                        
-                        let chunk_results = join_all(chunk_tasks).await;
-                        for result in chunk_results {
-                            match result {
-                                Ok(Ok(Some(block))) => node_blocks.push(block),
-                                Ok(Ok(None)) => warn!("Block not found"),
-                                Ok(Err(e)) => error!("Failed to fetch block: {}", e),
-                                Err(e) => error!("Task failed: {}", e),
-                            }
-                        }
-                        if chunk_end < node_end {
-                            tokio::time::sleep(Duration::from_millis(50)).await;
+            info!("📦 Batch request: blocks {} to {} ({} blocks in 1 HTTP request)", 
+                  chunk_start, chunk_end, block_numbers.len());
+            
+            match batch_client.get_blocks_batch(block_numbers).await {
+                Ok(blocks) => {
+                    for block_opt in blocks {
+                        if let Some(block) = block_opt {
+                            all_blocks.push(block);
                         }
                     }
-                    
-                    node_blocks
-                });
-                
-                fetch_tasks.push(task);
+                }
+                Err(e) => {
+                    warn!("Batch request failed, falling back to individual requests: {}", e);
+                    // Fallback to individual requests for this chunk
+                    for block_num in chunk_start..=chunk_end {
+                        if let Ok(Some(block)) = self.nodes[0].get_block_by_number(block_num).await {
+                            all_blocks.push(block);
+                        }
+                    }
+                }
             }
+            
+            // 1 second delay between batch requests (rate limiting)
+            tokio::time::sleep(Duration::from_millis(1000)).await;
         }
-        let mut all_blocks = Vec::new();
-        let results = join_all(fetch_tasks).await;
         
-        for result in results {
-            match result {
-                Ok(mut blocks) => all_blocks.append(&mut blocks),
-                Err(e) => error!("Node fetch task failed: {}", e),
-            }
-        }
+        // Sort by block number to maintain order
         all_blocks.sort_by_key(|b| b.number.unwrap_or_default());
         
         Ok(all_blocks)
@@ -203,7 +190,7 @@ impl MegaBatchIndexer {
             info!("📦 Fetching batch of {} receipts", chunk.len());
             let receipts = batch_client.get_receipts_batch(chunk.to_vec(), chunk.len()).await?;
             all_receipts.extend(receipts);
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
         }
         
         Ok(all_receipts)
