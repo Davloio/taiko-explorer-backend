@@ -399,6 +399,29 @@ impl QueryResolver {
     }
 
      async fn stats(&self) -> Result<ExplorerStats> {
+        // Try to get stats from materialized view first (fast)
+        match self.block_repo.get_stats_from_materialized_view() {
+            Ok(view_stats) => {
+                // Check if the view is fresh (less than 1 hour old)
+                let is_fresh = self.block_repo.is_stats_view_fresh().unwrap_or(false);
+                
+                if is_fresh {
+                    // Use fast materialized view data
+                    return Ok(ExplorerStats {
+                        total_blocks: view_stats.total_blocks,
+                        latest_block_number: view_stats.latest_block_number,
+                        total_transactions: view_stats.total_transactions,
+                        total_addresses: view_stats.total_unique_addresses,
+                        avg_block_time: 12.0,
+                    });
+                }
+            },
+            Err(_) => {
+                // Materialized view doesn't exist yet, fall back to individual queries
+            }
+        }
+
+        // Fallback to individual queries (slower but works if view doesn't exist)
         let total_blocks = match self.block_repo.get_block_count() {
             Ok(count) => count,
             Err(e) => return Err(Error::new(format!("Database error: {}", e))),
@@ -409,13 +432,22 @@ impl QueryResolver {
             Ok(None) => 0,
             Err(_) => 0,
         };
+        
         let total_transactions = match self.block_repo.get_transaction_count() {
             Ok(count) => count,
             Err(_) => 0,
         };
-        let total_addresses = match self.block_repo.get_unique_address_count() {
-            Ok(count) => count,
-            Err(_) => 0,
+        
+        // Use fast address count method if address_stats table has data
+        let total_addresses = match self.block_repo.get_unique_address_count_fast() {
+            Ok(count) if count > 0 => count,
+            _ => {
+                // Fallback to slow method if needed
+                match self.block_repo.get_unique_address_count() {
+                    Ok(count) => count,
+                    Err(_) => 0,
+                }
+            }
         };
 
         let avg_block_time = 12.0;
@@ -720,9 +752,15 @@ impl QueryResolver {
             })
             .collect();
 
-        let total_addresses = match self.block_repo.get_unique_address_count() {
-            Ok(count) => count as i32,
-            Err(_) => data_points.last().map(|p| p.total_addresses).unwrap_or(0),
+        let total_addresses = match self.block_repo.get_unique_address_count_fast() {
+            Ok(count) if count > 0 => count as i32,
+            _ => {
+                // Fallback to slow method or chart data
+                match self.block_repo.get_unique_address_count() {
+                    Ok(count) => count as i32,
+                    Err(_) => data_points.last().map(|p| p.total_addresses).unwrap_or(0),
+                }
+            }
         };
         let first_total = data_points.first().map(|p| p.total_addresses).unwrap_or(0);
         

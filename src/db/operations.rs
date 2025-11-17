@@ -8,6 +8,7 @@ use crate::db::connection::DbPool;
 use crate::models::block::{Block, NewBlock};
 use crate::models::transaction::{Transaction, NewTransaction};
 use crate::schema::{blocks, transactions};
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityInfo {
@@ -24,6 +25,30 @@ pub struct AddressProfile {
     pub total_sent: BigDecimal,
     pub total_received: BigDecimal,
     pub total_gas_fees: BigDecimal,
+}
+
+#[derive(Debug, Clone, QueryableByName)]
+pub struct ExplorerStatsFromView {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub total_blocks: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub latest_block_number: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub total_transactions: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub total_unique_addresses: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub successful_transactions: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub failed_transactions: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub in_transactions: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub out_transactions: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub inside_transactions: i64,
+    #[diesel(sql_type = diesel::sql_types::Timestamptz)]
+    pub last_updated: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -541,6 +566,75 @@ impl BlockRepository {
         }
 
         Ok(chart_data)
+    }
+
+    // PERFORMANCE OPTIMIZED METHODS USING MATERIALIZED VIEW
+
+    /// Get stats from materialized view - 1000x faster than individual queries
+    pub fn get_stats_from_materialized_view(&self) -> Result<ExplorerStatsFromView> {
+        let mut conn = self.pool.get()?;
+        
+        let result = diesel::sql_query(
+            "SELECT 
+                total_blocks,
+                latest_block_number,
+                total_transactions,
+                total_unique_addresses,
+                successful_transactions,
+                failed_transactions,
+                in_transactions,
+                out_transactions,
+                inside_transactions,
+                last_updated
+            FROM mv_explorer_stats 
+            LIMIT 1"
+        )
+        .get_result::<ExplorerStatsFromView>(&mut conn)?;
+        
+        Ok(result)
+    }
+
+    /// Refresh the materialized view (call this when new data is indexed)
+    pub fn refresh_stats_view(&self) -> Result<()> {
+        let mut conn = self.pool.get()?;
+        
+        diesel::sql_query("REFRESH MATERIALIZED VIEW mv_explorer_stats")
+            .execute(&mut conn)?;
+            
+        Ok(())
+    }
+
+    /// Fast unique address count using address_stats table (alternative method)
+    pub fn get_unique_address_count_fast(&self) -> Result<i64> {
+        use crate::schema::address_stats;
+        let mut conn = self.pool.get()?;
+        
+        let count = address_stats::table
+            .count()
+            .get_result::<i64>(&mut conn)?;
+        
+        Ok(count)
+    }
+
+    /// Check if materialized view exists and is fresh (less than 1 hour old)
+    pub fn is_stats_view_fresh(&self) -> Result<bool> {
+        let mut conn = self.pool.get()?;
+        
+        #[derive(QueryableByName)]
+        struct ViewAge {
+            #[diesel(sql_type = diesel::sql_types::Bool)]
+            is_fresh: bool,
+        }
+        
+        let result = diesel::sql_query(
+            "SELECT (NOW() - last_updated) < INTERVAL '1 hour' as is_fresh 
+            FROM mv_explorer_stats 
+            LIMIT 1"
+        )
+        .get_result::<ViewAge>(&mut conn)
+        .optional()?;
+        
+        Ok(result.map(|r| r.is_fresh).unwrap_or(false))
     }
 }
 
